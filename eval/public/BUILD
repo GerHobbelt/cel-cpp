@@ -139,7 +139,6 @@ cc_library(
     deps = ["//base:attributes"],
 )
 
-# buildifier: leave-alone
 cc_library(
     name = "activation",
     srcs = [
@@ -154,6 +153,8 @@ cc_library(
         ":cel_function",
         ":cel_value",
         ":cel_value_producer",
+        "//runtime/internal:attribute_matcher",
+        "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
@@ -1045,7 +1046,8 @@ cc_library(
         ":cel_attribute",
         ":cel_function",
         ":cel_value",
-        "@com_google_absl//absl/base:core_headers",
+        "//runtime/internal:attribute_matcher",
+        "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/strings",
         "@com_google_protobuf//:field_mask_cc_proto",
     ],
