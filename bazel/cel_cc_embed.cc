@@ -60,7 +60,7 @@ void WriteFile(const std::string& path, absl::Span<const char> data) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, const char** argv) {
   {
     auto args = absl::ParseCommandLine(argc, argv);
     ABSL_CHECK(args.empty() || args.size() == 1)
