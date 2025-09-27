@@ -15,6 +15,7 @@
 #include "extensions/comprehensions_v2_macros.h"
 
 #include <utility>
+#include <vector>
 
 #include "absl/base/no_destructor.h"
 #include "absl/log/absl_check.h"
@@ -29,6 +30,7 @@
 #include "parser/macro_expr_factory.h"
 #include "parser/macro_registry.h"
 #include "parser/options.h"
+#include "parser/parser_interface.h"
 
 namespace cel::extensions {
 
@@ -213,9 +215,9 @@ absl::optional<Expr> ExpandTransformList3Macro(MacroExprFactory& factory,
         args[1], absl::StrCat("transformList() second variable name cannot be ",
                               kAccumulatorVariableName));
   }
-  auto iter_var = args[0].ident_expr().name();
-  auto iter_var2 = args[1].ident_expr().name();
-  auto step = factory.NewCall(
+  std::string iter_var = args[0].ident_expr().name();
+  std::string iter_var2 = args[1].ident_expr().name();
+  Expr step = factory.NewCall(
       CelOperator::ADD, factory.NewAccuIdent(),
       factory.NewList(factory.NewListElement(std::move(args[2]))));
   return factory.NewComprehension(std::move(iter_var), std::move(iter_var2),
@@ -262,9 +264,9 @@ absl::optional<Expr> ExpandTransformList4Macro(MacroExprFactory& factory,
         args[1], absl::StrCat("transformList() second variable name cannot be ",
                               kAccumulatorVariableName));
   }
-  auto iter_var = args[0].ident_expr().name();
-  auto iter_var2 = args[1].ident_expr().name();
-  auto step = factory.NewCall(
+  std::string iter_var = args[0].ident_expr().name();
+  std::string iter_var2 = args[1].ident_expr().name();
+  Expr step = factory.NewCall(
       CelOperator::ADD, factory.NewAccuIdent(),
       factory.NewList(factory.NewListElement(std::move(args[3]))));
   step = factory.NewCall(CelOperator::CONDITIONAL, std::move(args[2]),
@@ -305,7 +307,7 @@ absl::optional<Expr> ExpandTransformMap3Macro(MacroExprFactory& factory,
   }
   if (args[0].ident_expr().name() == kAccumulatorVariableName) {
     return factory.ReportErrorAt(
-        args[0], absl::StrCat("transforMap() first variable name cannot be ",
+        args[0], absl::StrCat("transformMap() first variable name cannot be ",
                               kAccumulatorVariableName));
   }
   if (args[1].ident_expr().name() == kAccumulatorVariableName) {
@@ -313,9 +315,9 @@ absl::optional<Expr> ExpandTransformMap3Macro(MacroExprFactory& factory,
         args[1], absl::StrCat("transformMap() second variable name cannot be ",
                               kAccumulatorVariableName));
   }
-  auto iter_var = args[0].ident_expr().name();
-  auto iter_var2 = args[1].ident_expr().name();
-  auto step = factory.NewCall("cel.@mapInsert", factory.NewAccuIdent(),
+  std::string iter_var = args[0].ident_expr().name();
+  std::string iter_var2 = args[1].ident_expr().name();
+  Expr step = factory.NewCall("cel.@mapInsert", factory.NewAccuIdent(),
                               std::move(args[0]), std::move(args[2]));
   return factory.NewComprehension(std::move(iter_var), std::move(iter_var2),
                                   std::move(target), factory.AccuVarName(),
@@ -361,9 +363,9 @@ absl::optional<Expr> ExpandTransformMap4Macro(MacroExprFactory& factory,
         args[1], absl::StrCat("transformMap() second variable name cannot be ",
                               kAccumulatorVariableName));
   }
-  auto iter_var = args[0].ident_expr().name();
-  auto iter_var2 = args[1].ident_expr().name();
-  auto step = factory.NewCall("cel.@mapInsert", factory.NewAccuIdent(),
+  std::string iter_var = args[0].ident_expr().name();
+  std::string iter_var2 = args[1].ident_expr().name();
+  Expr step = factory.NewCall("cel.@mapInsert", factory.NewAccuIdent(),
                               std::move(args[0]), std::move(args[3]));
   step = factory.NewCall(CelOperator::CONDITIONAL, std::move(args[2]),
                          std::move(step), factory.NewAccuIdent());
@@ -376,6 +378,108 @@ absl::optional<Expr> ExpandTransformMap4Macro(MacroExprFactory& factory,
 Macro MakeTransformMap4Macro() {
   auto status_or_macro =
       Macro::Receiver("transformMap", 4, ExpandTransformMap4Macro);
+  ABSL_CHECK_OK(status_or_macro);  // Crash OK
+  return std::move(*status_or_macro);
+}
+
+absl::optional<Expr> ExpandTransformMapEntry3Macro(MacroExprFactory& factory,
+                                                   Expr& target,
+                                                   absl::Span<Expr> args) {
+  if (args.size() != 3) {
+    return factory.ReportError("transformMapEntry() requires 3 arguments");
+  }
+  if (!args[0].has_ident_expr() || args[0].ident_expr().name().empty()) {
+    return factory.ReportErrorAt(
+        args[0],
+        "transformMapEntry() first variable name must be a simple identifier");
+  }
+  if (!args[1].has_ident_expr() || args[1].ident_expr().name().empty()) {
+    return factory.ReportErrorAt(
+        args[1],
+        "transformMapEntry() second variable name must be a simple identifier");
+  }
+  if (args[0].ident_expr().name() == args[1].ident_expr().name()) {
+    return factory.ReportErrorAt(args[0],
+                                 "transformMapEntry() second variable must be "
+                                 "different from the first variable");
+  }
+  if (args[0].ident_expr().name() == kAccumulatorVariableName) {
+    return factory.ReportErrorAt(
+        args[0],
+        absl::StrCat("transformMapEntry() first variable name cannot be ",
+                     kAccumulatorVariableName));
+  }
+  if (args[1].ident_expr().name() == kAccumulatorVariableName) {
+    return factory.ReportErrorAt(
+        args[1],
+        absl::StrCat("transformMapEntry() second variable name cannot be ",
+                     kAccumulatorVariableName));
+  }
+  std::string iter_var = args[0].ident_expr().name();
+  std::string iter_var2 = args[1].ident_expr().name();
+  Expr step = factory.NewCall("cel.@mapInsert", factory.NewAccuIdent(),
+                              std::move(args[2]));
+  return factory.NewComprehension(std::move(iter_var), std::move(iter_var2),
+                                  std::move(target), factory.AccuVarName(),
+                                  factory.NewMap(), factory.NewBoolConst(true),
+                                  std::move(step), factory.NewAccuIdent());
+}
+
+Macro MakeTransformMap3EntryMacro() {
+  auto status_or_macro =
+      Macro::Receiver("transformMapEntry", 3, ExpandTransformMapEntry3Macro);
+  ABSL_CHECK_OK(status_or_macro);  // Crash OK
+  return std::move(*status_or_macro);
+}
+
+absl::optional<Expr> ExpandTransformMapEntry4Macro(MacroExprFactory& factory,
+                                                   Expr& target,
+                                                   absl::Span<Expr> args) {
+  if (args.size() != 4) {
+    return factory.ReportError("transformMapEntry() requires 4 arguments");
+  }
+  if (!args[0].has_ident_expr() || args[0].ident_expr().name().empty()) {
+    return factory.ReportErrorAt(
+        args[0],
+        "transformMapEntry() first variable name must be a simple identifier");
+  }
+  if (!args[1].has_ident_expr() || args[1].ident_expr().name().empty()) {
+    return factory.ReportErrorAt(
+        args[1],
+        "transformMapEntry() second variable name must be a simple identifier");
+  }
+  if (args[0].ident_expr().name() == args[1].ident_expr().name()) {
+    return factory.ReportErrorAt(args[0],
+                                 "transformMapEntry() second variable must be "
+                                 "different from the first variable");
+  }
+  if (args[0].ident_expr().name() == kAccumulatorVariableName) {
+    return factory.ReportErrorAt(
+        args[0],
+        absl::StrCat("transformMapEntry() first variable name cannot be ",
+                     kAccumulatorVariableName));
+  }
+  if (args[1].ident_expr().name() == kAccumulatorVariableName) {
+    return factory.ReportErrorAt(
+        args[1],
+        absl::StrCat("transformMapEntry() second variable name cannot be ",
+                     kAccumulatorVariableName));
+  }
+  std::string iter_var = args[0].ident_expr().name();
+  std::string iter_var2 = args[1].ident_expr().name();
+  Expr step = factory.NewCall("cel.@mapInsert", factory.NewAccuIdent(),
+                              std::move(args[3]));
+  step = factory.NewCall(CelOperator::CONDITIONAL, std::move(args[2]),
+                         std::move(step), factory.NewAccuIdent());
+  return factory.NewComprehension(std::move(iter_var), std::move(iter_var2),
+                                  std::move(target), factory.AccuVarName(),
+                                  factory.NewMap(), factory.NewBoolConst(true),
+                                  std::move(step), factory.NewAccuIdent());
+}
+
+Macro MakeTransformMapEntry4Macro() {
+  auto status_or_macro =
+      Macro::Receiver("transformMapEntry", 4, ExpandTransformMapEntry4Macro);
   ABSL_CHECK_OK(status_or_macro);  // Crash OK
   return std::move(*status_or_macro);
 }
@@ -415,18 +519,45 @@ const Macro& TransformMap4Macro() {
   return *macro;
 }
 
+const Macro& TransformMapEntry3Macro() {
+  static const absl::NoDestructor<Macro> macro(MakeTransformMap3EntryMacro());
+  return *macro;
+}
+
+const Macro& TransformMapEntry4Macro() {
+  static const absl::NoDestructor<Macro> macro(MakeTransformMapEntry4Macro());
+  return *macro;
+}
+
 }  // namespace
+
+std::vector<Macro> AllMacros() {
+  return {AllMacro2(),
+          ExistsMacro2(),
+          ExistsOneMacro2(),
+          TransformList3Macro(),
+          TransformList4Macro(),
+          TransformMap3Macro(),
+          TransformMap4Macro(),
+          TransformMapEntry3Macro(),
+          TransformMapEntry4Macro()};
+}
 
 // Registers the macros defined by the comprehension v2 extension.
 absl::Status RegisterComprehensionsV2Macros(MacroRegistry& registry,
                                             const ParserOptions&) {
-  CEL_RETURN_IF_ERROR(registry.RegisterMacro(AllMacro2()));
-  CEL_RETURN_IF_ERROR(registry.RegisterMacro(ExistsMacro2()));
-  CEL_RETURN_IF_ERROR(registry.RegisterMacro(ExistsOneMacro2()));
-  CEL_RETURN_IF_ERROR(registry.RegisterMacro(TransformList3Macro()));
-  CEL_RETURN_IF_ERROR(registry.RegisterMacro(TransformList4Macro()));
-  CEL_RETURN_IF_ERROR(registry.RegisterMacro(TransformMap3Macro()));
-  CEL_RETURN_IF_ERROR(registry.RegisterMacro(TransformMap4Macro()));
+  for (const Macro& macro : AllMacros()) {
+    CEL_RETURN_IF_ERROR(registry.RegisterMacro(macro));
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status RegisterComprehensionsV2Macros(ParserBuilder& parser_builder) {
+  for (const Macro& macro : AllMacros()) {
+    CEL_RETURN_IF_ERROR(parser_builder.AddMacro(macro));
+  }
+
   return absl::OkStatus();
 }
 
