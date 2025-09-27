@@ -25,10 +25,9 @@ cc_library(
     hdrs = ["expr_printer.h"],
     deps = [
         "//common:ast",
+        "//common:ast_proto",
         "//common:constant",
         "//common:expr",
-        "//common/ast:ast_impl",
-        "//extensions/protobuf:ast_converters",
         "//internal:strings",
         "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/log:absl_log",
@@ -71,7 +70,6 @@ cc_library(
         ":expr_printer",
         "//common:ast",
         "//common:expr",
-        "//common/ast:ast_impl",
         "//common/ast:expr",
         "//extensions/protobuf:ast_converters",
         "@com_google_absl//absl/strings",
@@ -84,7 +82,7 @@ cc_test(
     srcs = ["baseline_tests_test.cc"],
     deps = [
         ":baseline_tests",
-        "//common/ast:ast_impl",
+        "//common:ast",
         "//common/ast:expr",
         "//internal:testing",
         "@com_google_protobuf//:protobuf",

@@ -12,35 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_CEL_CPP_TOOLS_NAVIGABLE_AST_H_
-#define THIRD_PARTY_CEL_CPP_TOOLS_NAVIGABLE_AST_H_
+#ifndef THIRD_PARTY_CEL_CPP_COMMON_NAVIGABLE_AST_H_
+#define THIRD_PARTY_CEL_CPP_COMMON_NAVIGABLE_AST_H_
 
-
-#include "cel/expr/syntax.pb.h"
 #include "common/ast/navigable_ast_internal.h"
 #include "common/ast/navigable_ast_kinds.h"  // IWYU pragma: export
+#include "common/expr.h"
 
 namespace cel {
 
-class NavigableProtoAst;
-class NavigableProtoAstNode;
+class NavigableAst;
+class NavigableAstNode;
 
 namespace common_internal {
 
-struct ProtoAstTraits {
-  using ExprType = cel::expr::Expr;
-  using AstType = NavigableProtoAst;
-  using NodeType = NavigableProtoAstNode;
+struct NativeAstTraits {
+  using ExprType = Expr;
+  using AstType = NavigableAst;
+  using NodeType = NavigableAstNode;
 };
 
 }  // namespace common_internal
 
 // Wrapper around a CEL AST node that exposes traversal information.
-class NavigableProtoAstNode : public common_internal::NavigableAstNodeBase<
-                                  common_internal::ProtoAstTraits> {
+class NavigableAstNode : public common_internal::NavigableAstNodeBase<
+                             common_internal::NativeAstTraits> {
  private:
   using Base =
-      common_internal::NavigableAstNodeBase<common_internal::ProtoAstTraits>;
+      common_internal::NavigableAstNodeBase<common_internal::NativeAstTraits>;
 
  public:
   // A const Span like type that provides pre-order traversal for a sub tree.
@@ -84,7 +83,7 @@ class NavigableProtoAstNode : public common_internal::NavigableAstNodeBase<
   // semantics. Each node is visited immediately before all of its descendants.
   //
   // example:
-  //  for (const cel::NavigableProtoAstNode& node :
+  //  for (const cel::NavigableAstNode& node :
   //  ast.Root().DescendantsPreorder()) {
   //    ...
   //  }
@@ -102,9 +101,9 @@ class NavigableProtoAstNode : public common_internal::NavigableAstNodeBase<
   using Base::DescendantsPostorder;
 
  private:
-  friend class NavigableProtoAst;
+  friend class NavigableAst;
 
-  NavigableProtoAstNode() = default;
+  NavigableAstNode() = default;
 };
 
 // NavigableExpr provides a view over a CEL AST that allows for generalized
@@ -118,28 +117,28 @@ class NavigableProtoAstNode : public common_internal::NavigableAstNodeBase<
 // `NavigableAst` and Navigable nodes are independent of the input Expr and may
 // outlive it, but may contain dangling pointers if the input Expr is modified
 // or destroyed.
-class NavigableProtoAst : public common_internal::NavigableAstBase<
-                              common_internal::ProtoAstTraits> {
+class NavigableAst : public common_internal::NavigableAstBase<
+                         common_internal::NativeAstTraits> {
  private:
   using Base =
-      common_internal::NavigableAstBase<common_internal::ProtoAstTraits>;
+      common_internal::NavigableAstBase<common_internal::NativeAstTraits>;
 
  public:
-  static NavigableProtoAst Build(const cel::expr::Expr& expr);
+  static NavigableAst Build(const Expr& expr);
 
   // Default constructor creates an empty instance.
   //
   // Operations other than equality are undefined on an empty instance.
   //
-  // This is intended for composed object construction, a new NavigableProtoAst
+  // This is intended for composed object construction, a new NavigableAst
   // should be obtained from the Build factory function.
-  NavigableProtoAst() = default;
+  NavigableAst() = default;
 
   // Move only.
-  NavigableProtoAst(const NavigableProtoAst&) = delete;
-  NavigableProtoAst& operator=(const NavigableProtoAst&) = delete;
-  NavigableProtoAst(NavigableProtoAst&&) = default;
-  NavigableProtoAst& operator=(NavigableProtoAst&&) = default;
+  NavigableAst(const NavigableAst&) = delete;
+  NavigableAst& operator=(const NavigableAst&) = delete;
+  NavigableAst(NavigableAst&&) = default;
+  NavigableAst& operator=(NavigableAst&&) = default;
 
   // Return ptr to the AST node with id if present. Otherwise returns nullptr.
   //
@@ -164,11 +163,6 @@ class NavigableProtoAst : public common_internal::NavigableAstBase<
   using Base::Base;
 };
 
-// Type aliases for backwards compatibility.
-// To be removed.
-using AstNode = NavigableProtoAstNode;
-using NavigableAst = NavigableProtoAst;
-
 }  // namespace cel
 
-#endif  // THIRD_PARTY_CEL_CPP_TOOLS_NAVIGABLE_AST_H_
+#endif  // THIRD_PARTY_CEL_CPP_COMMON_NAVIGABLE_AST_H_

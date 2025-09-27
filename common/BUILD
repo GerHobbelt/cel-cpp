@@ -33,6 +33,17 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "ast_test",
+    srcs = ["ast_test.cc"],
+    deps = [
+        ":ast",
+        ":expr",
+        "//internal:testing",
+        "@com_google_absl//absl/container:flat_hash_map",
+    ],
+)
+
 cc_library(
     name = "expr",
     srcs = ["expr.cc"],
@@ -42,6 +53,7 @@ cc_library(
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:no_destructor",
+        "@com_google_absl//absl/functional:overload",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:optional",
         "@com_google_absl//absl/types:span",
@@ -55,6 +67,40 @@ cc_test(
     deps = [
         ":expr",
         "//internal:testing",
+    ],
+)
+
+cc_library(
+    name = "navigable_ast",
+    srcs = ["navigable_ast.cc"],
+    hdrs = ["navigable_ast.h"],
+    deps = [
+        ":ast_traverse",
+        ":ast_visitor",
+        ":ast_visitor_base",
+        ":expr",
+        "//common/ast:navigable_ast_internal",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/functional:any_invocable",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/types:optional",
+    ],
+)
+
+cc_test(
+    name = "navigable_ast_test",
+    srcs = ["navigable_ast_test.cc"],
+    deps = [
+        ":ast",
+        ":expr",
+        ":navigable_ast",
+        ":source",
+        ":standard_definitions",
+        "//internal:status_macros",
+        "//internal:testing",
+        "//parser",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
 
@@ -141,7 +187,6 @@ cc_test(
         ":ast_rewrite",
         ":ast_visitor",
         ":expr",
-        "//common/ast:ast_impl",
         "//common/ast:expr_proto",
         "//extensions/protobuf:ast_converters",
         "//internal:testing",
@@ -992,10 +1037,10 @@ cc_library(
     srcs = ["ast_proto.cc"],
     hdrs = ["ast_proto.h"],
     deps = [
+        ":ast",
         ":constant",
         ":expr",
         "//base:ast",
-        "//common/ast:ast_impl",
         "//common/ast:constant_proto",
         "//common/ast:expr",
         "//common/ast:expr_proto",
@@ -1022,18 +1067,25 @@ cc_test(
     deps = [
         ":ast",
         ":ast_proto",
+        ":decl",
         ":expr",
-        "//common/ast:ast_impl",
+        ":source",
+        ":type",
         "//common/ast:expr",
+        "//compiler",
+        "//compiler:compiler_factory",
+        "//compiler:optional",
+        "//compiler:standard_library",
+        "//extensions:comprehensions_v2",
         "//internal:proto_matchers",
         "//internal:status_macros",
         "//internal:testing",
-        "//parser",
-        "//parser:options",
+        "//internal:testing_descriptor_pool",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:variant",
         "@com_google_cel_spec//proto/cel/expr:checked_cc_proto",

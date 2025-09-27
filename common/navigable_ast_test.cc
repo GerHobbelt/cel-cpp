@@ -12,35 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tools/navigable_ast.h"
+#include "common/navigable_ast.h"
 
+#include <memory>
 #include <utility>
 #include <vector>
 
-#include "cel/expr/syntax.pb.h"
-#include "base/builtins.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "common/ast.h"
+#include "common/expr.h"
+#include "common/source.h"
+#include "common/standard_definitions.h"
+#include "internal/status_macros.h"
 #include "internal/testing.h"
 #include "parser/parser.h"
 
 namespace cel {
 namespace {
 
-using ::cel::expr::Expr;
-using ::google::api::expr::parser::Parse;
 using ::testing::ElementsAre;
 using ::testing::IsEmpty;
 using ::testing::Pair;
 using ::testing::SizeIs;
 
-TEST(NavigableProtoAst, Basic) {
+absl::StatusOr<std::unique_ptr<Ast>> Parse(absl::string_view expr) {
+  static const auto* parser = cel::NewParserBuilder()->Build()->release();
+  CEL_ASSIGN_OR_RETURN(auto source, cel::NewSource(expr));
+  return parser->Parse(*source);
+}
+
+TEST(NavigableAst, Basic) {
   Expr const_node;
   const_node.set_id(1);
-  const_node.mutable_const_expr()->set_int64_value(42);
+  const_node.mutable_const_expr().set_int_value(42);
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(const_node);
+  NavigableAst ast = NavigableAst::Build(const_node);
   EXPECT_TRUE(ast.IdsAreUnique());
 
-  const NavigableProtoAstNode& root = ast.Root();
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.expr(), &const_node);
   EXPECT_THAT(root.children(), IsEmpty());
@@ -50,15 +60,15 @@ TEST(NavigableProtoAst, Basic) {
   EXPECT_EQ(root.parent_relation(), ChildKind::kUnspecified);
 }
 
-TEST(NavigableProtoAst, DefaultCtorEmpty) {
+TEST(NavigableAst, DefaultCtorEmpty) {
   Expr const_node;
   const_node.set_id(1);
-  const_node.mutable_const_expr()->set_int64_value(42);
+  const_node.mutable_const_expr().set_int_value(42);
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(const_node);
+  NavigableAst ast = NavigableAst::Build(const_node);
   EXPECT_EQ(ast, ast);
 
-  NavigableProtoAst empty;
+  NavigableAst empty;
 
   EXPECT_NE(ast, empty);
   EXPECT_EQ(empty, empty);
@@ -66,41 +76,42 @@ TEST(NavigableProtoAst, DefaultCtorEmpty) {
   EXPECT_TRUE(static_cast<bool>(ast));
   EXPECT_FALSE(static_cast<bool>(empty));
 
-  NavigableProtoAst moved = std::move(ast);
+  NavigableAst moved = std::move(ast);
   EXPECT_EQ(ast, empty);
   EXPECT_FALSE(static_cast<bool>(ast));
   EXPECT_TRUE(static_cast<bool>(moved));
 }
 
-TEST(NavigableProtoAst, FindById) {
+TEST(NavigableAst, FindById) {
   Expr const_node;
   const_node.set_id(1);
-  const_node.mutable_const_expr()->set_int64_value(42);
+  const_node.mutable_const_expr().set_int_value(42);
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(const_node);
+  NavigableAst ast = NavigableAst::Build(const_node);
 
-  const NavigableProtoAstNode& root = ast.Root();
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(ast.FindId(const_node.id()), &root);
   EXPECT_EQ(ast.FindId(-1), nullptr);
 }
 
 MATCHER_P(AstNodeWrapping, expr, "") {
-  const NavigableProtoAstNode* ptr = arg;
+  const NavigableAstNode* ptr = arg;
   return ptr != nullptr && ptr->expr() == expr;
 }
 
-TEST(NavigableProtoAst, ToleratesNonUnique) {
+TEST(NavigableAst, ToleratesNonUnique) {
   Expr call_node;
   call_node.set_id(1);
-  call_node.mutable_call_expr()->set_function(cel::builtin::kNot);
-  Expr* const_node = call_node.mutable_call_expr()->add_args();
-  const_node->mutable_const_expr()->set_bool_value(false);
+  call_node.mutable_call_expr().set_function(cel::StandardFunctions::kNot);
+  Expr* const_node =
+      &call_node.mutable_call_expr().mutable_args().emplace_back();
+  const_node->mutable_const_expr().set_bool_value(false);
   const_node->set_id(1);
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(call_node);
+  NavigableAst ast = NavigableAst::Build(call_node);
 
-  const NavigableProtoAstNode& root = ast.Root();
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(ast.FindId(1), &root);
   EXPECT_EQ(ast.FindExpr(&call_node), &root);
@@ -108,26 +119,28 @@ TEST(NavigableProtoAst, ToleratesNonUnique) {
   EXPECT_THAT(ast.FindExpr(const_node), AstNodeWrapping(const_node));
 }
 
-TEST(NavigableProtoAst, FindByExprPtr) {
+TEST(NavigableAst, FindByExprPtr) {
   Expr const_node;
   const_node.set_id(1);
-  const_node.mutable_const_expr()->set_int64_value(42);
+  const_node.mutable_const_expr().set_int_value(42);
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(const_node);
+  NavigableAst ast = NavigableAst::Build(const_node);
 
-  const NavigableProtoAstNode& root = ast.Root();
+  const NavigableAstNode& root = ast.Root();
+
+  Expr other_expr;
 
   EXPECT_EQ(ast.FindExpr(&const_node), &root);
-  EXPECT_EQ(ast.FindExpr(&Expr::default_instance()), nullptr);
+  EXPECT_EQ(ast.FindExpr(&other_expr), nullptr);
 }
 
-TEST(NavigableProtoAst, Children) {
+TEST(NavigableAst, Children) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("1 + 2"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
-  EXPECT_EQ(root.expr(), &parsed_expr.expr());
+  EXPECT_EQ(root.expr(), &parsed_expr->root_expr());
   EXPECT_THAT(root.children(), SizeIs(2));
   EXPECT_TRUE(root.parent() == nullptr);
   EXPECT_EQ(root.child_index(), -1);
@@ -136,8 +149,9 @@ TEST(NavigableProtoAst, Children) {
 
   EXPECT_THAT(
       root.children(),
-      ElementsAre(AstNodeWrapping(&parsed_expr.expr().call_expr().args(0)),
-                  AstNodeWrapping(&parsed_expr.expr().call_expr().args(1))));
+      ElementsAre(
+          AstNodeWrapping(&parsed_expr->root_expr().call_expr().args().at(0)),
+          AstNodeWrapping(&parsed_expr->root_expr().call_expr().args().at(1))));
 
   ASSERT_THAT(root.children(), SizeIs(2));
   const auto* child1 = root.children()[0];
@@ -151,11 +165,11 @@ TEST(NavigableProtoAst, Children) {
   EXPECT_EQ(child2->child_index(), 1);
 }
 
-TEST(NavigableProtoAst, UnspecifiedExpr) {
+TEST(NavigableAst, UnspecifiedExpr) {
   Expr expr;
   expr.set_id(1);
-  NavigableProtoAst ast = NavigableProtoAst::Build(expr);
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(expr);
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.expr(), &expr);
   EXPECT_THAT(root.children(), SizeIs(0));
@@ -164,11 +178,11 @@ TEST(NavigableProtoAst, UnspecifiedExpr) {
   EXPECT_EQ(root.node_kind(), NodeKind::kUnspecified);
 }
 
-TEST(NavigableProtoAst, ParentRelationSelect) {
+TEST(NavigableAst, ParentRelationSelect) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("a.b"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   ASSERT_THAT(root.children(), SizeIs(1));
   const auto* child = root.children()[0];
@@ -177,11 +191,11 @@ TEST(NavigableProtoAst, ParentRelationSelect) {
   EXPECT_EQ(child->node_kind(), NodeKind::kIdent);
 }
 
-TEST(NavigableProtoAst, ParentRelationCallReceiver) {
+TEST(NavigableAst, ParentRelationCallReceiver) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("a.b()"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   ASSERT_THAT(root.children(), SizeIs(1));
   const auto* child = root.children()[0];
@@ -190,12 +204,12 @@ TEST(NavigableProtoAst, ParentRelationCallReceiver) {
   EXPECT_EQ(child->node_kind(), NodeKind::kIdent);
 }
 
-TEST(NavigableProtoAst, ParentRelationCreateStruct) {
+TEST(NavigableAst, ParentRelationCreateStruct) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr,
                        Parse("com.example.Type{field: '123'}"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kStruct);
   ASSERT_THAT(root.children(), SizeIs(1));
@@ -205,11 +219,11 @@ TEST(NavigableProtoAst, ParentRelationCreateStruct) {
   EXPECT_EQ(child->node_kind(), NodeKind::kConstant);
 }
 
-TEST(NavigableProtoAst, ParentRelationCreateMap) {
+TEST(NavigableAst, ParentRelationCreateMap) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("{'a': 123}"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kMap);
   ASSERT_THAT(root.children(), SizeIs(2));
@@ -223,11 +237,11 @@ TEST(NavigableProtoAst, ParentRelationCreateMap) {
   EXPECT_EQ(value->node_kind(), NodeKind::kConstant);
 }
 
-TEST(NavigableProtoAst, ParentRelationCreateList) {
+TEST(NavigableAst, ParentRelationCreateList) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("[123]"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kList);
   ASSERT_THAT(root.children(), SizeIs(1));
@@ -237,11 +251,11 @@ TEST(NavigableProtoAst, ParentRelationCreateList) {
   EXPECT_EQ(child->node_kind(), NodeKind::kConstant);
 }
 
-TEST(NavigableProtoAst, ParentRelationComprehension) {
+TEST(NavigableAst, ParentRelationComprehension) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("[1].all(x, x < 2)"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kComprehension);
   ASSERT_THAT(root.children(), SizeIs(5));
@@ -258,18 +272,18 @@ TEST(NavigableProtoAst, ParentRelationComprehension) {
   EXPECT_EQ(finish->parent_relation(), ChildKind::kComprensionResult);
 }
 
-TEST(NavigableProtoAst, DescendantsPostorder) {
+TEST(NavigableAst, DescendantsPostorder) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("1 + (x * 3)"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kCall);
 
   std::vector<int> constants;
   std::vector<NodeKind> node_kinds;
 
-  for (const NavigableProtoAstNode& node : root.DescendantsPostorder()) {
+  for (const NavigableAstNode& node : root.DescendantsPostorder()) {
     if (node.node_kind() == NodeKind::kConstant) {
       constants.push_back(node.expr()->const_expr().int64_value());
     }
@@ -282,18 +296,18 @@ TEST(NavigableProtoAst, DescendantsPostorder) {
   EXPECT_THAT(constants, ElementsAre(1, 3));
 }
 
-TEST(NavigableProtoAst, DescendantsPreorder) {
+TEST(NavigableAst, DescendantsPreorder) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("1 + (x * 3)"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kCall);
 
   std::vector<int> constants;
   std::vector<NodeKind> node_kinds;
 
-  for (const NavigableProtoAstNode& node : root.DescendantsPreorder()) {
+  for (const NavigableAstNode& node : root.DescendantsPreorder()) {
     if (node.node_kind() == NodeKind::kConstant) {
       constants.push_back(node.expr()->const_expr().int64_value());
     }
@@ -306,17 +320,17 @@ TEST(NavigableProtoAst, DescendantsPreorder) {
   EXPECT_THAT(constants, ElementsAre(1, 3));
 }
 
-TEST(NavigableProtoAst, DescendantsPreorderComprehension) {
+TEST(NavigableAst, DescendantsPreorderComprehension) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("[1, 2, 3].map(x, x + 1)"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kComprehension);
 
   std::vector<std::pair<NodeKind, ChildKind>> node_kinds;
 
-  for (const NavigableProtoAstNode& node : root.DescendantsPreorder()) {
+  for (const NavigableAstNode& node : root.DescendantsPreorder()) {
     node_kinds.push_back(
         std::make_pair(node.node_kind(), node.parent_relation()));
   }
@@ -339,11 +353,11 @@ TEST(NavigableProtoAst, DescendantsPreorderComprehension) {
                   Pair(NodeKind::kIdent, ChildKind::kComprensionResult)));
 }
 
-TEST(NavigableProtoAst, TreeSize) {
+TEST(NavigableAst, TreeSize) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("[1, 2, 3].map(x, x + 1)"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kComprehension);
 
@@ -354,11 +368,11 @@ TEST(NavigableProtoAst, TreeSize) {
   EXPECT_EQ(it->tree_size(), 1);
 }
 
-TEST(NavigableProtoAst, Height) {
+TEST(NavigableAst, Height) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("[1, 2, 3].map(x, x + 1)"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kComprehension);
 
@@ -369,17 +383,17 @@ TEST(NavigableProtoAst, Height) {
   EXPECT_EQ(it->height(), 1);
 }
 
-TEST(NavigableProtoAst, DescendantsPreorderCreateMap) {
+TEST(NavigableAst, DescendantsPreorderCreateMap) {
   ASSERT_OK_AND_ASSIGN(auto parsed_expr, Parse("{'key1': 1, 'key2': 2}"));
 
-  NavigableProtoAst ast = NavigableProtoAst::Build(parsed_expr.expr());
-  const NavigableProtoAstNode& root = ast.Root();
+  NavigableAst ast = NavigableAst::Build(parsed_expr->root_expr());
+  const NavigableAstNode& root = ast.Root();
 
   EXPECT_EQ(root.node_kind(), NodeKind::kMap);
 
   std::vector<std::pair<NodeKind, ChildKind>> node_kinds;
 
-  for (const NavigableProtoAstNode& node : root.DescendantsPreorder()) {
+  for (const NavigableAstNode& node : root.DescendantsPreorder()) {
     node_kinds.push_back(
         std::make_pair(node.node_kind(), node.parent_relation()));
   }

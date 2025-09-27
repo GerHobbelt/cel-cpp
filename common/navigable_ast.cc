@@ -1,4 +1,4 @@
-// Copyright 2023 Google LLC
+// Copyright 2025 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,59 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tools/navigable_ast.h"
+#include "common/navigable_ast.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
-#include "cel/expr/checked.pb.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/functional/any_invocable.h"
 #include "absl/memory/memory.h"
+#include "absl/types/optional.h"
 #include "common/ast/navigable_ast_internal.h"
-#include "eval/public/ast_traverse.h"
-#include "eval/public/ast_visitor.h"
-#include "eval/public/ast_visitor_base.h"
-#include "eval/public/source_position.h"
+#include "common/ast_traverse.h"
+#include "common/ast_visitor.h"
+#include "common/ast_visitor_base.h"
+#include "common/expr.h"
 
 namespace cel {
 
 namespace {
 
-using ::cel::expr::Expr;
-using ::google::api::expr::runtime::AstTraverse;
-using ::google::api::expr::runtime::SourcePosition;
-
 using NavigableAstNodeData =
-    common_internal::NavigableAstNodeData<common_internal::ProtoAstTraits>;
+    common_internal::NavigableAstNodeData<common_internal::NativeAstTraits>;
 using NavigableAstMetadata =
-    common_internal::NavigableAstMetadata<common_internal::ProtoAstTraits>;
+    common_internal::NavigableAstMetadata<common_internal::NativeAstTraits>;
 
 NodeKind GetNodeKind(const Expr& expr) {
-  switch (expr.expr_kind_case()) {
-    case Expr::kConstExpr:
+  switch (expr.kind_case()) {
+    case ExprKindCase::kConstant:
       return NodeKind::kConstant;
-    case Expr::kIdentExpr:
+    case ExprKindCase::kIdentExpr:
       return NodeKind::kIdent;
-    case Expr::kSelectExpr:
+    case ExprKindCase::kSelectExpr:
       return NodeKind::kSelect;
-    case Expr::kCallExpr:
+    case ExprKindCase::kCallExpr:
       return NodeKind::kCall;
-    case Expr::kListExpr:
+    case ExprKindCase::kListExpr:
       return NodeKind::kList;
-    case Expr::kStructExpr:
-      if (!expr.struct_expr().message_name().empty()) {
-        return NodeKind::kStruct;
-      } else {
-        return NodeKind::kMap;
-      }
-    case Expr::kComprehensionExpr:
+    case ExprKindCase::kStructExpr:
+      return NodeKind::kStruct;
+    case ExprKindCase::kMapExpr:
+      return NodeKind::kMap;
+    case ExprKindCase::kComprehensionExpr:
       return NodeKind::kComprehension;
-    case Expr::EXPR_KIND_NOT_SET:
+    case ExprKindCase::kUnspecifiedExpr:
     default:
       return NodeKind::kUnspecified;
   }
@@ -73,18 +66,8 @@ NodeKind GetNodeKind(const Expr& expr) {
 // Get the traversal relationship from parent to the given node.
 // Note: these depend on the ast_visitor utility's traversal ordering.
 ChildKind GetChildKind(const NavigableAstNodeData& parent_node,
-                       size_t child_index) {
-  constexpr size_t kComprehensionRangeArgIndex =
-      google::api::expr::runtime::ITER_RANGE;
-  constexpr size_t kComprehensionInitArgIndex =
-      google::api::expr::runtime::ACCU_INIT;
-  constexpr size_t kComprehensionConditionArgIndex =
-      google::api::expr::runtime::LOOP_CONDITION;
-  constexpr size_t kComprehensionLoopStepArgIndex =
-      google::api::expr::runtime::LOOP_STEP;
-  constexpr size_t kComprehensionResultArgIndex =
-      google::api::expr::runtime::RESULT;
-
+                       size_t child_index,
+                       absl::optional<ComprehensionArg> comprehension_arg) {
   switch (parent_node.node_kind) {
     case NodeKind::kStruct:
       return ChildKind::kStructValue;
@@ -103,16 +86,19 @@ ChildKind GetChildKind(const NavigableAstNodeData& parent_node,
       }
       return ChildKind::kCallArg;
     case NodeKind::kComprehension:
-      switch (child_index) {
-        case kComprehensionRangeArgIndex:
+      if (!comprehension_arg.has_value()) {
+        return ChildKind::kUnspecified;
+      }
+      switch (*comprehension_arg) {
+        case ComprehensionArg::ITER_RANGE:
           return ChildKind::kComprehensionRange;
-        case kComprehensionInitArgIndex:
+        case ComprehensionArg::ACCU_INIT:
           return ChildKind::kComprehensionInit;
-        case kComprehensionConditionArgIndex:
+        case ComprehensionArg::LOOP_CONDITION:
           return ChildKind::kComprehensionCondition;
-        case kComprehensionLoopStepArgIndex:
+        case ComprehensionArg::LOOP_STEP:
           return ChildKind::kComprehensionLoopStep;
-        case kComprehensionResultArgIndex:
+        case ComprehensionArg::RESULT:
           return ChildKind::kComprensionResult;
         default:
           return ChildKind::kUnspecified;
@@ -122,12 +108,12 @@ ChildKind GetChildKind(const NavigableAstNodeData& parent_node,
   }
 }
 
-class NavigableExprBuilderVisitor
-    : public google::api::expr::runtime::AstVisitorBase {
+class NavigableExprBuilderVisitor : public cel::AstVisitorBase {
  public:
   NavigableExprBuilderVisitor(
-      absl::AnyInvocable<std::unique_ptr<AstNode>()> node_factory,
-      absl::AnyInvocable<NavigableAstNodeData&(AstNode&)> node_data_accessor)
+      absl::AnyInvocable<std::unique_ptr<NavigableAstNode>()> node_factory,
+      absl::AnyInvocable<NavigableAstNodeData&(NavigableAstNode&)>
+          node_data_accessor)
       : node_factory_(std::move(node_factory)),
         node_data_accessor_(std::move(node_data_accessor)),
         metadata_(std::make_unique<NavigableAstMetadata>()) {}
@@ -136,38 +122,44 @@ class NavigableExprBuilderVisitor
     return node_data_accessor_(*metadata_->nodes[index]);
   }
 
-  void PreVisitExpr(const Expr* expr, const SourcePosition* position) override {
-    NavigableProtoAstNode* parent =
+  void PreVisitExpr(const Expr& expr) override {
+    NavigableAstNode* parent =
         parent_stack_.empty() ? nullptr
                               : metadata_->nodes[parent_stack_.back()].get();
     size_t index = metadata_->nodes.size();
     metadata_->nodes.push_back(node_factory_());
-    NavigableProtoAstNode* node = metadata_->nodes[index].get();
+    NavigableAstNode* node = metadata_->nodes[index].get();
     auto& node_data = NodeDataAt(index);
     node_data.parent = parent;
-    node_data.expr = expr;
+    node_data.expr = &expr;
     node_data.parent_relation = ChildKind::kUnspecified;
-    node_data.node_kind = GetNodeKind(*expr);
+    node_data.node_kind = GetNodeKind(expr);
     node_data.tree_size = 1;
     node_data.height = 1;
     node_data.index = index;
     node_data.child_index = -1;
     node_data.metadata = metadata_.get();
 
-    metadata_->id_to_node.insert({expr->id(), node});
-    metadata_->expr_to_node.insert({expr, node});
+    metadata_->id_to_node.insert({expr.id(), node});
+    metadata_->expr_to_node.insert({&expr, node});
     if (!parent_stack_.empty()) {
       auto& parent_node_data = NodeDataAt(parent_stack_.back());
       size_t child_index = parent_node_data.children.size();
       parent_node_data.children.push_back(node);
-      node_data.parent_relation = GetChildKind(parent_node_data, child_index);
+      node_data.parent_relation =
+          GetChildKind(parent_node_data, child_index, comprehension_arg_);
       node_data.child_index = child_index;
     }
     parent_stack_.push_back(index);
   }
 
-  void PostVisitExpr(const Expr* expr,
-                     const SourcePosition* position) override {
+  void PreVisitComprehensionSubexpression(
+      const Expr& expr, const ComprehensionExpr& comprehension,
+      ComprehensionArg comprehension_arg) override {
+    comprehension_arg_ = comprehension_arg;
+  }
+
+  void PostVisitExpr(const Expr& expr) override {
     size_t idx = parent_stack_.back();
     parent_stack_.pop_back();
     metadata_->postorder.push_back(metadata_->nodes[idx].get());
@@ -185,20 +177,26 @@ class NavigableExprBuilderVisitor
   }
 
  private:
-  absl::AnyInvocable<std::unique_ptr<AstNode>()> node_factory_;
-  absl::AnyInvocable<NavigableAstNodeData&(AstNode&)> node_data_accessor_;
+  absl::AnyInvocable<std::unique_ptr<NavigableAstNode>()> node_factory_;
+  absl::AnyInvocable<NavigableAstNodeData&(NavigableAstNode&)>
+      node_data_accessor_;
   std::unique_ptr<NavigableAstMetadata> metadata_;
   std::vector<size_t> parent_stack_;
+  absl::optional<ComprehensionArg> comprehension_arg_;
 };
 
 }  // namespace
 
-NavigableProtoAst NavigableProtoAst::Build(const Expr& expr) {
+NavigableAst NavigableAst::Build(const Expr& expr) {
+  cel::TraversalOptions opts;
+  opts.use_comprehension_callbacks = true;
   NavigableExprBuilderVisitor visitor(
-      []() { return absl::WrapUnique(new AstNode()); },
-      [](AstNode& node) -> NavigableAstNodeData& { return node.data_; });
-  AstTraverse(&expr, /*source_info=*/nullptr, &visitor);
-  return NavigableProtoAst(std::move(visitor).Consume());
+      []() { return absl::WrapUnique(new NavigableAstNode()); },
+      [](NavigableAstNode& node) -> NavigableAstNodeData& {
+        return node.data_;
+      });
+  AstTraverse(expr, visitor, opts);
+  return NavigableAst(std::move(visitor).Consume());
 }
 
 }  // namespace cel

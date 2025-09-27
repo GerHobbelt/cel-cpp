@@ -21,7 +21,6 @@
 #include "cel/expr/syntax.pb.h"
 #include "absl/status/status_matchers.h"
 #include "common/ast.h"
-#include "common/ast/ast_impl.h"
 #include "common/ast/expr_proto.h"
 #include "common/ast_visitor.h"
 #include "common/expr.h"
@@ -35,7 +34,6 @@ namespace cel {
 namespace {
 
 using ::absl_testing::IsOk;
-using ::cel::ast_internal::AstImpl;
 using ::cel::ast_internal::ExprFromProto;
 using ::cel::extensions::CreateAstFromParsedExpr;
 using ::testing::_;
@@ -535,9 +533,8 @@ TEST(AstRewrite, SelectRewriteExample) {
       std::unique_ptr<Ast> ast,
       CreateAstFromParsedExpr(
           google::api::expr::parser::Parse("com.google.Identifier").value()));
-  AstImpl& ast_impl = AstImpl::CastFromPublicAst(*ast);
   RewriterExample example;
-  ASSERT_TRUE(AstRewrite(ast_impl.mutable_root_expr(), example));
+  ASSERT_TRUE(AstRewrite(ast->mutable_root_expr(), example));
 
   cel::expr::Expr expected_expr;
   google::protobuf::TextFormat::ParseFromString(
@@ -550,7 +547,7 @@ TEST(AstRewrite, SelectRewriteExample) {
   cel::Expr expected_native;
   ASSERT_THAT(ExprFromProto(expected_expr, expected_native), IsOk());
 
-  EXPECT_EQ(ast_impl.root_expr(), expected_native);
+  EXPECT_EQ(ast->root_expr(), expected_native);
 }
 
 // Rewrites x -> y -> z to demonstrate traversal when a node is rewritten on
@@ -591,8 +588,7 @@ TEST(AstRewrite, PreAndPostVisitExpample) {
       std::unique_ptr<Ast> ast,
       CreateAstFromParsedExpr(google::api::expr::parser::Parse("x").value()));
   PreRewriterExample visitor;
-  AstImpl& ast_impl = AstImpl::CastFromPublicAst(*ast);
-  ASSERT_TRUE(AstRewrite(ast_impl.mutable_root_expr(), visitor));
+  ASSERT_TRUE(AstRewrite(ast->mutable_root_expr(), visitor));
 
   cel::expr::Expr expected_expr;
   google::protobuf::TextFormat::ParseFromString(
@@ -604,7 +600,7 @@ TEST(AstRewrite, PreAndPostVisitExpample) {
   cel::Expr expected_native;
   ASSERT_THAT(ExprFromProto(expected_expr, expected_native), IsOk());
 
-  EXPECT_EQ(ast_impl.root_expr(), expected_native);
+  EXPECT_EQ(ast->root_expr(), expected_native);
   EXPECT_THAT(visitor.visited_idents(), ElementsAre("y"));
 }
 

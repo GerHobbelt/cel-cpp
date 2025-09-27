@@ -74,30 +74,6 @@ cc_test(
 )
 
 cc_library(
-    name = "ast_impl",
-    hdrs = ["ast_impl.h"],
-    deps = [
-        ":expr",
-        ":metadata",
-        "//common:ast",
-        "//common:expr",
-        "//internal:casts",
-    ],
-)
-
-cc_test(
-    name = "ast_impl_test",
-    srcs = ["ast_impl_test.cc"],
-    deps = [
-        ":ast_impl",
-        ":expr",
-        "//common:ast",
-        "//internal:testing",
-        "@com_google_absl//absl/container:flat_hash_map",
-    ],
-)
-
-cc_library(
     name = "expr",
     hdrs = [
         "expr.h",
@@ -149,5 +125,34 @@ cc_test(
         "//common:expr",
         "//internal:testing",
         "@com_google_absl//absl/types:variant",
+    ],
+)
+
+cc_library(
+    name = "navigable_ast_internal",
+    srcs = ["navigable_ast_kinds.cc"],
+    hdrs = [
+        "navigable_ast_internal.h",
+        "navigable_ast_kinds.h",
+    ],
+    deps = [
+        "@com_google_absl//absl/base:nullability",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "navigable_ast_internal_test",
+    srcs = ["navigable_ast_internal_test.cc"],
+    deps = [
+        ":navigable_ast_internal",
+        "//internal:testing",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
     ],
 )
