@@ -290,6 +290,7 @@ cc_library(
         "operators.h",
     ],
     deps = [
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:optional",
         "@com_google_cel_spec//proto/cel/expr:syntax_cc_proto",
@@ -1042,7 +1043,6 @@ cc_library(
         ":expr",
         "//base:ast",
         "//common/ast:constant_proto",
-        "//common/ast:expr",
         "//common/ast:expr_proto",
         "//common/ast:source_info_proto",
         "//internal:status_macros",
@@ -1071,7 +1071,6 @@ cc_test(
         ":expr",
         ":source",
         ":type",
-        "//common/ast:expr",
         "//compiler",
         "//compiler:compiler_factory",
         "//compiler:optional",

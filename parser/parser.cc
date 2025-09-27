@@ -54,11 +54,9 @@
 #include "absl/types/variant.h"
 #include "antlr4-runtime.h"
 #include "common/ast.h"
-#include "common/ast/expr.h"
 #include "common/ast/expr_proto.h"
 #include "common/ast/source_info_proto.h"
 #include "common/constant.h"
-#include "common/expr.h"
 #include "common/expr_factory.h"
 #include "common/operators.h"
 #include "common/source.h"
@@ -670,7 +668,7 @@ class ParserVisitor final : public CelBaseVisitor,
   std::any visitNull(CelParser::NullContext* ctx) override;
   // Note: this is destructive and intended to be called after the parse is
   // finished.
-  cel::ast_internal::SourceInfo GetSourceInfo();
+  cel::SourceInfo GetSourceInfo();
   EnrichedSourceInfo enriched_source_info() const;
   void syntaxError(antlr4::Recognizer* recognizer,
                    antlr4::Token* offending_symbol, size_t line, size_t col,
@@ -1397,8 +1395,8 @@ std::any ParserVisitor::visitNull(CelParser::NullContext* ctx) {
       factory_.NextId(SourceRangeFromParserRuleContext(ctx))));
 }
 
-cel::ast_internal::SourceInfo ParserVisitor::GetSourceInfo() {
-  cel::ast_internal::SourceInfo source_info;
+cel::SourceInfo ParserVisitor::GetSourceInfo() {
+  cel::SourceInfo source_info;
   source_info.set_location(std::string(source_.description()));
   for (const auto& positions : factory_.positions()) {
     source_info.mutable_positions().insert(
@@ -1638,7 +1636,7 @@ class RecoveryLimitErrorStrategy final : public DefaultErrorStrategy {
 
 struct ParseResult {
   cel::Expr expr;
-  cel::ast_internal::SourceInfo source_info;
+  cel::SourceInfo source_info;
   EnrichedSourceInfo enriched_source_info;
 };
 
