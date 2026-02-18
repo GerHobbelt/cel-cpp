@@ -18,20 +18,22 @@
 #ifndef THIRD_PARTY_CEL_CPP_RUNTIME_FUNCTION_ADAPTER_H_
 #define THIRD_PARTY_CEL_CPP_RUNTIME_FUNCTION_ADAPTER_H_
 
+#include <cstddef>
 #include <functional>
 #include <memory>
+#include <tuple>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "absl/base/nullability.h"
 #include "absl/functional/any_invocable.h"
-#include "absl/functional/bind_front.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "common/function_descriptor.h"
-#include "common/kind.h"
 #include "common/value.h"
 #include "internal/status_macros.h"
 #include "runtime/function.h"
@@ -94,79 +96,73 @@ struct AdaptedTypeTraits<const T&> {
   static T ToArg(AssignableType v) { return v; }
 };
 
-template <typename... Args>
-struct KindAdderImpl;
-
-template <typename Arg, typename... Args>
-struct KindAdderImpl<Arg, Args...> {
-  static void AddTo(std::vector<cel::Kind>& args) {
-    args.push_back(AdaptedKind<Arg>());
-    KindAdderImpl<Args...>::AddTo(args);
-  }
-};
-
-template <>
-struct KindAdderImpl<> {
-  static void AddTo(std::vector<cel::Kind>& args) {}
-};
-
-template <typename... Args>
-struct KindAdder {
-  static std::vector<cel::Kind> Kinds() {
-    std::vector<cel::Kind> args;
-    KindAdderImpl<Args...>::AddTo(args);
-    return args;
-  }
-};
-
-template <typename T>
-struct ApplyReturnType {
-  using type = absl::StatusOr<T>;
-};
-
-template <typename T>
-struct ApplyReturnType<absl::StatusOr<T>> {
-  using type = absl::StatusOr<T>;
-};
-
-template <int N, typename Arg, typename... Args>
-struct IndexerImpl {
-  using type = typename IndexerImpl<N - 1, Args...>::type;
-};
-
-template <typename Arg, typename... Args>
-struct IndexerImpl<0, Arg, Args...> {
-  using type = Arg;
-};
-
-template <int N, typename... Args>
-struct Indexer {
-  static_assert(N < sizeof...(Args) && N >= 0);
-  using type = typename IndexerImpl<N, Args...>::type;
-};
-
-template <int N, typename... Args>
-struct ApplyHelper {
-  template <typename T, typename Op>
-  static typename ApplyReturnType<T>::type Apply(
-      Op&& op, absl::Span<const Value> input) {
-    constexpr int idx = sizeof...(Args) - N;
-    using Arg = typename Indexer<idx, Args...>::type;
-    using ArgTraits = AdaptedTypeTraits<Arg>;
-    typename ArgTraits::AssignableType arg_i;
-    CEL_RETURN_IF_ERROR(HandleToAdaptedVisitor{input[idx]}(&arg_i));
-
-    return ApplyHelper<N - 1, Args...>::template Apply<T>(
-        absl::bind_front(std::forward<Op>(op), ArgTraits::ToArg(arg_i)), input);
+template <size_t I, typename... Args>
+struct AdaptHelperImpl {
+  template <typename T>
+  static absl::Status Apply(absl::Span<const Value> input, T& output) {
+    static_assert(sizeof...(Args) > 0);
+    static_assert(std::tuple_size_v<T> == sizeof...(Args));
+    CEL_RETURN_IF_ERROR(ValueToAdaptedVisitor{input[I]}(&std::get<I>(output)));
+    if constexpr (I == sizeof...(Args) - 1) {
+      return absl::OkStatus();
+    } else {
+      CEL_RETURN_IF_ERROR(
+          (AdaptHelperImpl<I + 1, Args...>::template Apply<T>(input, output)));
+    }
+    return absl::OkStatus();
   }
 };
 
 template <typename... Args>
-struct ApplyHelper<0, Args...> {
-  template <typename T, typename Op>
-  static typename ApplyReturnType<T>::type Apply(
-      Op&& op, absl::Span<const Value> input) {
-    return op();
+struct AdaptHelper {
+  template <typename T>
+  static absl::Status Apply(absl::Span<const Value> input, T& output) {
+    return AdaptHelperImpl<0, Args...>::template Apply<T>(input, output);
+  }
+};
+
+template <typename... Args>
+struct ToArgsImpl {
+  template <int I, typename T>
+  struct El {
+    using type = T;
+    constexpr static size_t index = I;
+  };
+
+  template <typename... Es>
+  struct ZipHolder {
+    template <typename ResultType, typename TupleType, typename Op>
+    static ResultType ToArgs(
+        Op&& op, const TupleType& argbuffer,
+        const google::protobuf::DescriptorPool* absl_nonnull descriptor_pool,
+        google::protobuf::MessageFactory* absl_nonnull message_factory,
+        google::protobuf::Arena* absl_nonnull arena) {
+      return std::forward<Op>(op)(
+          runtime_internal::AdaptedTypeTraits<typename Es::type>::ToArg(
+              std::get<Es::index>(argbuffer))...,
+          descriptor_pool, message_factory, arena);
+    }
+  };
+
+  template <size_t... Is>
+  static ZipHolder<El<Is, Args>...> MakeZip(const std::index_sequence<Is...>&) {
+    return ZipHolder<El<Is, Args>...>{};
+  }
+};
+
+template <typename... Args>
+struct ToArgsHelper {
+  template <typename ResultType, typename TupleType, typename Op>
+  static ResultType Apply(
+      Op&& op, const TupleType& argbuffer,
+      const google::protobuf::DescriptorPool* absl_nonnull descriptor_pool,
+      google::protobuf::MessageFactory* absl_nonnull message_factory,
+      google::protobuf::Arena* absl_nonnull arena) {
+    using Impl = ToArgsImpl<Args...>;
+    using Zip = decltype(Impl::MakeZip(std::index_sequence_for<Args...>{}));
+    return Zip::template ToArgs<ResultType>(std::forward<Op>(op), argbuffer,
+                                            descriptor_pool, message_factory,
+                                            arena);
   }
 };
 
@@ -205,10 +201,10 @@ class NullaryFunctionAdapter
     return std::make_unique<UnaryFunctionImpl>(std::move(fn));
   }
 
-  static std::unique_ptr<cel::Function> WrapFunction(
-      absl::AnyInvocable<T() const> function) {
+  template <typename F, typename = std::enable_if_t<std::is_invocable_v<F>>>
+  static std::unique_ptr<cel::Function> WrapFunction(F&& function) {
     return WrapFunction(
-        [function = std::move(function)](
+        [function = std::forward<F>(function)](
             const google::protobuf::DescriptorPool* absl_nonnull,
             google::protobuf::MessageFactory* absl_nonnull,
             google::protobuf::Arena* absl_nonnull) -> T { return function(); });
@@ -216,8 +212,15 @@ class NullaryFunctionAdapter
 
   static FunctionDescriptor CreateDescriptor(absl::string_view name,
                                              bool receiver_style,
-                                             bool is_strict = true) {
-    return FunctionDescriptor(name, receiver_style, {}, is_strict);
+                                             bool is_strict) {
+    return CreateDescriptor(name, receiver_style,
+                            {is_strict, /*is_contextual=*/false});
+  }
+
+  static FunctionDescriptor CreateDescriptor(
+      absl::string_view name, bool receiver_style,
+      FunctionDescriptorOptions options = {}) {
+    return FunctionDescriptor(name, receiver_style, {}, options);
   }
 
  private:
@@ -240,7 +243,7 @@ class NullaryFunctionAdapter
       } else {
         T result = fn_(descriptor_pool, message_factory, arena);
 
-        return runtime_internal::AdaptedToHandleVisitor{}(std::move(result));
+        return runtime_internal::AdaptedToValueVisitor{}(std::move(result));
       }
     }
 
@@ -281,10 +284,10 @@ class UnaryFunctionAdapter : public RegisterHelper<UnaryFunctionAdapter<T, U>> {
     return std::make_unique<UnaryFunctionImpl>(std::move(fn));
   }
 
-  static std::unique_ptr<cel::Function> WrapFunction(
-      absl::AnyInvocable<T(U) const> function) {
+  template <typename F, typename = std::enable_if_t<std::is_invocable_v<F, U>>>
+  static std::unique_ptr<cel::Function> WrapFunction(F&& function) {
     return WrapFunction(
-        [function = std::move(function)](
+        [function = std::forward<F>(function)](
             U arg1, const google::protobuf::DescriptorPool* absl_nonnull,
             google::protobuf::MessageFactory* absl_nonnull,
             google::protobuf::Arena* absl_nonnull) -> T { return function(arg1); });
@@ -292,9 +295,17 @@ class UnaryFunctionAdapter : public RegisterHelper<UnaryFunctionAdapter<T, U>> {
 
   static FunctionDescriptor CreateDescriptor(absl::string_view name,
                                              bool receiver_style,
-                                             bool is_strict = true) {
+                                             bool is_strict) {
+    return CreateDescriptor(
+        name, receiver_style,
+        FunctionDescriptorOptions{is_strict, /*is_contextual=*/false});
+  }
+
+  static FunctionDescriptor CreateDescriptor(
+      absl::string_view name, bool receiver_style,
+      FunctionDescriptorOptions options = {}) {
     return FunctionDescriptor(name, receiver_style,
-                              {runtime_internal::AdaptedKind<U>()}, is_strict);
+                              {runtime_internal::AdaptedKind<U>()}, options);
   }
 
  private:
@@ -314,7 +325,7 @@ class UnaryFunctionAdapter : public RegisterHelper<UnaryFunctionAdapter<T, U>> {
       typename ArgTraits::AssignableType arg1;
 
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[0]}(&arg1));
+          runtime_internal::ValueToAdaptedVisitor{args[0]}(&arg1));
       if constexpr (std::is_same_v<T, Value> ||
                     std::is_same_v<T, absl::StatusOr<Value>>) {
         return fn_(ArgTraits::ToArg(arg1), descriptor_pool, message_factory,
@@ -323,7 +334,7 @@ class UnaryFunctionAdapter : public RegisterHelper<UnaryFunctionAdapter<T, U>> {
         T result = fn_(ArgTraits::ToArg(arg1), descriptor_pool, message_factory,
                        arena);
 
-        return runtime_internal::AdaptedToHandleVisitor{}(std::move(result));
+        return runtime_internal::AdaptedToValueVisitor{}(std::move(result));
       }
     }
 
@@ -411,10 +422,11 @@ class BinaryFunctionAdapter
     return std::make_unique<BinaryFunctionImpl>(std::move(fn));
   }
 
-  static std::unique_ptr<cel::Function> WrapFunction(
-      absl::AnyInvocable<T(U, V) const> function) {
+  template <typename F,
+            typename = std::enable_if_t<std::is_invocable_v<F, U, V>>>
+  static std::unique_ptr<cel::Function> WrapFunction(F&& function) {
     return WrapFunction(
-        [function = std::move(function)](
+        [function = std::forward<F>(function)](
             U arg1, V arg2, const google::protobuf::DescriptorPool* absl_nonnull,
             google::protobuf::MessageFactory* absl_nonnull,
             google::protobuf::Arena* absl_nonnull) -> T { return function(arg1, arg2); });
@@ -422,11 +434,18 @@ class BinaryFunctionAdapter
 
   static FunctionDescriptor CreateDescriptor(absl::string_view name,
                                              bool receiver_style,
-                                             bool is_strict = true) {
+                                             bool is_strict) {
+    return CreateDescriptor(name, receiver_style,
+                            {is_strict, /*is_contextual=*/false});
+  }
+
+  static FunctionDescriptor CreateDescriptor(
+      absl::string_view name, bool receiver_style,
+      FunctionDescriptorOptions options = {}) {
     return FunctionDescriptor(name, receiver_style,
                               {runtime_internal::AdaptedKind<U>(),
                                runtime_internal::AdaptedKind<V>()},
-                              is_strict);
+                              options);
   }
 
  private:
@@ -447,9 +466,9 @@ class BinaryFunctionAdapter
       typename Arg1Traits::AssignableType arg1;
       typename Arg2Traits::AssignableType arg2;
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[0]}(&arg1));
+          runtime_internal::ValueToAdaptedVisitor{args[0]}(&arg1));
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[1]}(&arg2));
+          runtime_internal::ValueToAdaptedVisitor{args[1]}(&arg2));
 
       if constexpr (std::is_same_v<T, Value> ||
                     std::is_same_v<T, absl::StatusOr<Value>>) {
@@ -459,7 +478,7 @@ class BinaryFunctionAdapter
         T result = fn_(Arg1Traits::ToArg(arg1), Arg2Traits::ToArg(arg2),
                        descriptor_pool, message_factory, arena);
 
-        return runtime_internal::AdaptedToHandleVisitor{}(std::move(result));
+        return runtime_internal::AdaptedToValueVisitor{}(std::move(result));
       }
     }
 
@@ -480,9 +499,10 @@ class TernaryFunctionAdapter
     return std::make_unique<TernaryFunctionImpl>(std::move(fn));
   }
 
-  static std::unique_ptr<cel::Function> WrapFunction(
-      absl::AnyInvocable<T(U, V, W) const> function) {
-    return WrapFunction([function = std::move(function)](
+  template <typename F,
+            typename = std::enable_if_t<std::is_invocable_v<F, U, V, W>>>
+  static std::unique_ptr<cel::Function> WrapFunction(F&& function) {
+    return WrapFunction([function = std::forward<F>(function)](
                             U arg1, V arg2, W arg3,
                             const google::protobuf::DescriptorPool* absl_nonnull,
                             google::protobuf::MessageFactory* absl_nonnull,
@@ -493,12 +513,20 @@ class TernaryFunctionAdapter
 
   static FunctionDescriptor CreateDescriptor(absl::string_view name,
                                              bool receiver_style,
-                                             bool is_strict = true) {
+                                             bool is_strict) {
+    return CreateDescriptor(
+        name, receiver_style,
+        FunctionDescriptorOptions{is_strict, /*is_contextual=*/false});
+  }
+
+  static FunctionDescriptor CreateDescriptor(
+      absl::string_view name, bool receiver_style,
+      FunctionDescriptorOptions options = {}) {
     return FunctionDescriptor(
         name, receiver_style,
         {runtime_internal::AdaptedKind<U>(), runtime_internal::AdaptedKind<V>(),
          runtime_internal::AdaptedKind<W>()},
-        is_strict);
+        options);
   }
 
  private:
@@ -521,11 +549,11 @@ class TernaryFunctionAdapter
       typename Arg2Traits::AssignableType arg2;
       typename Arg3Traits::AssignableType arg3;
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[0]}(&arg1));
+          runtime_internal::ValueToAdaptedVisitor{args[0]}(&arg1));
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[1]}(&arg2));
+          runtime_internal::ValueToAdaptedVisitor{args[1]}(&arg2));
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[2]}(&arg3));
+          runtime_internal::ValueToAdaptedVisitor{args[2]}(&arg3));
 
       if constexpr (std::is_same_v<T, Value> ||
                     std::is_same_v<T, absl::StatusOr<Value>>) {
@@ -537,7 +565,7 @@ class TernaryFunctionAdapter
                        Arg3Traits::ToArg(arg3), descriptor_pool,
                        message_factory, arena);
 
-        return runtime_internal::AdaptedToHandleVisitor{}(std::move(result));
+        return runtime_internal::AdaptedToValueVisitor{}(std::move(result));
       }
     }
 
@@ -558,9 +586,10 @@ class QuaternaryFunctionAdapter
     return std::make_unique<QuaternaryFunctionImpl>(std::move(fn));
   }
 
-  static std::unique_ptr<cel::Function> WrapFunction(
-      absl::AnyInvocable<T(U, V, W, X) const> function) {
-    return WrapFunction([function = std::move(function)](
+  template <typename F,
+            typename = std::enable_if_t<std::is_invocable_v<F, U, V, W, X>>>
+  static std::unique_ptr<cel::Function> WrapFunction(F&& function) {
+    return WrapFunction([function = std::forward<F>(function)](
                             U arg1, V arg2, W arg3, X arg4,
                             const google::protobuf::DescriptorPool* absl_nonnull,
                             google::protobuf::MessageFactory* absl_nonnull,
@@ -571,13 +600,20 @@ class QuaternaryFunctionAdapter
 
   static FunctionDescriptor CreateDescriptor(absl::string_view name,
                                              bool receiver_style,
-                                             bool is_strict = true) {
+                                             bool is_strict) {
+    return CreateDescriptor(name, receiver_style,
+                            {is_strict, /*is_contextual=*/false});
+  }
+
+  static FunctionDescriptor CreateDescriptor(
+      absl::string_view name, bool receiver_style,
+      FunctionDescriptorOptions options = {}) {
     return FunctionDescriptor(
         name, receiver_style,
         {runtime_internal::AdaptedKind<U>(), runtime_internal::AdaptedKind<V>(),
          runtime_internal::AdaptedKind<W>(),
          runtime_internal::AdaptedKind<X>()},
-        is_strict);
+        options);
   }
 
  private:
@@ -602,13 +638,13 @@ class QuaternaryFunctionAdapter
       typename Arg3Traits::AssignableType arg3;
       typename Arg4Traits::AssignableType arg4;
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[0]}(&arg1));
+          runtime_internal::ValueToAdaptedVisitor{args[0]}(&arg1));
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[1]}(&arg2));
+          runtime_internal::ValueToAdaptedVisitor{args[1]}(&arg2));
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[2]}(&arg3));
+          runtime_internal::ValueToAdaptedVisitor{args[2]}(&arg3));
       CEL_RETURN_IF_ERROR(
-          runtime_internal::HandleToAdaptedVisitor{args[3]}(&arg4));
+          runtime_internal::ValueToAdaptedVisitor{args[3]}(&arg4));
 
       if constexpr (std::is_same_v<T, Value> ||
                     std::is_same_v<T, absl::StatusOr<Value>>) {
@@ -620,12 +656,112 @@ class QuaternaryFunctionAdapter
                        Arg3Traits::ToArg(arg3), Arg4Traits::ToArg(arg4),
                        descriptor_pool, message_factory, arena);
 
-        return runtime_internal::AdaptedToHandleVisitor{}(std::move(result));
+        return runtime_internal::AdaptedToValueVisitor{}(std::move(result));
       }
     }
 
    private:
     QuaternaryFunctionAdapter::FunctionType fn_;
+  };
+};
+
+// Primary template for n-ary adapter.
+template <typename T, typename... Args>
+class NaryFunctionAdapter;
+
+template <typename T>
+class NaryFunctionAdapter<T> : public NullaryFunctionAdapter<T> {};
+
+template <typename T, typename U>
+class NaryFunctionAdapter<T, U> : public UnaryFunctionAdapter<T, U> {};
+
+template <typename T, typename U, typename V>
+class NaryFunctionAdapter<T, U, V> : public BinaryFunctionAdapter<T, U, V> {};
+
+template <typename T, typename U, typename V, typename W>
+class NaryFunctionAdapter<T, U, V, W>
+    : public TernaryFunctionAdapter<T, U, V, W> {};
+
+template <typename T, typename U, typename V, typename W, typename X>
+class NaryFunctionAdapter<T, U, V, W, X>
+    : public QuaternaryFunctionAdapter<T, U, V, W, X> {};
+
+// N-ary function adapter.
+//
+// Prefer using one of the specific count adapters above for readability and
+// better error messages.
+template <typename T, typename... Args>
+class NaryFunctionAdapter
+    : public RegisterHelper<NaryFunctionAdapter<T, Args...>> {
+ public:
+  using FunctionType = absl::AnyInvocable<T(
+      Args..., const google::protobuf::DescriptorPool* absl_nonnull descriptor_pool,
+      google::protobuf::MessageFactory* absl_nonnull message_factory,
+      google::protobuf::Arena* absl_nonnull arena) const>;
+
+  static FunctionDescriptor CreateDescriptor(absl::string_view name,
+                                             bool receiver_style,
+                                             bool is_strict) {
+    return CreateDescriptor(name, receiver_style,
+                            {is_strict, /*is_contextual=*/false});
+  }
+
+  static FunctionDescriptor CreateDescriptor(
+      absl::string_view name, bool receiver_style,
+      FunctionDescriptorOptions options = {}) {
+    return FunctionDescriptor(name, receiver_style,
+                              {runtime_internal::AdaptedKind<Args>()...},
+                              options);
+  }
+
+  static std::unique_ptr<cel::Function> WrapFunction(FunctionType fn) {
+    return std::make_unique<NaryFunctionImpl>(std::move(fn));
+  }
+
+  template <typename F,
+            typename = std::enable_if_t<std::is_invocable_v<F, Args...>>>
+  static std::unique_ptr<cel::Function> WrapFunction(F&& function) {
+    return WrapFunction(
+        [function = std::forward<F>(function)](
+            Args... args, const google::protobuf::DescriptorPool* absl_nonnull,
+            google::protobuf::MessageFactory* absl_nonnull,
+            google::protobuf::Arena* absl_nonnull) -> T { return function(args...); });
+  }
+
+ private:
+  class NaryFunctionImpl : public cel::Function {
+   private:
+    using ArgBuffer = std::tuple<
+        typename runtime_internal::AdaptedTypeTraits<Args>::AssignableType...>;
+
+   public:
+    explicit NaryFunctionImpl(FunctionType fn) : fn_(std::move(fn)) {}
+    absl::StatusOr<Value> Invoke(
+        absl::Span<const Value> args,
+        const google::protobuf::DescriptorPool* absl_nonnull descriptor_pool,
+        google::protobuf::MessageFactory* absl_nonnull message_factory,
+        google::protobuf::Arena* absl_nonnull arena) const override {
+      if (args.size() != sizeof...(Args)) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("unexpected number of arguments for ", sizeof...(Args),
+                         "-ary function"));
+      }
+      ArgBuffer arg_buffer;
+      CEL_RETURN_IF_ERROR(
+          runtime_internal::AdaptHelper<Args...>::Apply(args, arg_buffer));
+      if constexpr (std::is_same_v<T, Value> ||
+                    std::is_same_v<T, absl::StatusOr<Value>>) {
+        return runtime_internal::ToArgsHelper<Args...>::template Apply<T>(
+            fn_, arg_buffer, descriptor_pool, message_factory, arena);
+      } else {
+        T result = runtime_internal::ToArgsHelper<Args...>::template Apply<T>(
+            fn_, arg_buffer, descriptor_pool, message_factory, arena);
+        return runtime_internal::AdaptedToValueVisitor{}(std::move(result));
+      }
+    }
+
+   private:
+    FunctionType fn_;
   };
 };
 

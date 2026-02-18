@@ -628,10 +628,12 @@ cc_library(
         ":native_type",
         ":optional_ref",
         ":type",
+        ":typeinfo",
         ":unknown",
         ":value_kind",
         "//base:attributes",
         "//common/internal:byte_string",
+        "//common/internal:reference_count",
         "//eval/internal:cel_value_equal",
         "//eval/public:cel_value",
         "//eval/public:message_wrapper",
@@ -656,6 +658,7 @@ cc_library(
         "//internal:utf8",
         "//internal:well_known_types",
         "//runtime:runtime_options",
+        "//runtime/internal:errors",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:no_destructor",
@@ -711,6 +714,7 @@ cc_test(
         "//internal:testing_descriptor_pool",
         "//internal:testing_message_factory",
         "//runtime:runtime_options",
+        "//runtime/internal:errors",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/functional:function_ref",
@@ -887,6 +891,7 @@ cc_library(
     deps = [
         "//internal:minimal_descriptors",
         "@com_google_absl//absl/base:nullability",
+        "@com_google_absl//absl/status",
         "@com_google_protobuf//:protobuf",
     ],
 )
@@ -897,6 +902,7 @@ cc_test(
     deps = [
         ":minimal_descriptor_pool",
         "//internal:testing",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_protobuf//:protobuf",
     ],
 )

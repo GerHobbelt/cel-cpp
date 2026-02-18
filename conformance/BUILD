@@ -53,6 +53,7 @@ cc_library(
         "//extensions:math_ext_decls",
         "//extensions:math_ext_macros",
         "//extensions:proto_ext",
+        "//extensions:select_optimization",
         "//extensions:strings",
         "//extensions/protobuf:enum_adapter",
         "//internal:status_macros",
@@ -184,6 +185,7 @@ _TESTS_TO_SKIP_MODERN = [
     "wrappers/field_mask/to_json",
     "wrappers/empty/to_json",
     "fields/qualified_identifier_resolution/map_value_repeat_key_heterogeneous",
+    "parse/receiver_function_names",
 
     # Future features for CEL 1.0
     # TODO(issues/119): Strong typing support for enums, specified but not implemented.
@@ -191,17 +193,6 @@ _TESTS_TO_SKIP_MODERN = [
     "enums/strong_proto3",
 
     # Not yet implemented.
-    "string_ext/char_at",
-    "string_ext/index_of",
-    "string_ext/last_index_of",
-    "string_ext/ascii_casing/upperascii",
-    "string_ext/ascii_casing/upperascii_unicode",
-    "string_ext/ascii_casing/upperascii_unicode_with_space",
-    "string_ext/replace",
-    "string_ext/substring",
-    "string_ext/trim",
-    "string_ext/quote",
-    "string_ext/value_errors",
     "string_ext/type_errors",
 ]
 
@@ -233,6 +224,7 @@ _TESTS_TO_SKIP_LEGACY = [
     "wrappers/field_mask/to_json",
     "wrappers/empty/to_json",
     "fields/qualified_identifier_resolution/map_value_repeat_key_heterogeneous",
+    "parse/receiver_function_names",
 
     # Future features for CEL 1.0
     # TODO(issues/119): Strong typing support for enums, specified but not implemented.
@@ -243,17 +235,6 @@ _TESTS_TO_SKIP_LEGACY = [
     "optionals/optionals",
 
     # Not yet implemented.
-    "string_ext/char_at",
-    "string_ext/index_of",
-    "string_ext/last_index_of",
-    "string_ext/ascii_casing/upperascii",
-    "string_ext/ascii_casing/upperascii_unicode",
-    "string_ext/ascii_casing/upperascii_unicode_with_space",
-    "string_ext/replace",
-    "string_ext/substring",
-    "string_ext/trim",
-    "string_ext/quote",
-    "string_ext/value_errors",
     "string_ext/type_errors",
 
     # TODO(uncreated-issue/81): Fix null assignment to a field
@@ -267,6 +248,12 @@ _TESTS_TO_SKIP_LEGACY = [
     "block_ext/basic/optional_map",
     "block_ext/basic/optional_map_chained",
     "block_ext/basic/optional_message",
+]
+
+_TESTS_TO_SKIP_CHECKED = [
+    # block is a post-check optimization that inserts internal variables. The C++ type checker
+    # needs support for a proper optimizer for this to work.
+    "block_ext",
 ]
 
 _TESTS_TO_SKIP_LEGACY_DASHBOARD = [
@@ -300,11 +287,34 @@ gen_conformance_tests(
     checked = True,
     data = _ALL_TESTS,
     modern = True,
-    skip_tests = _TESTS_TO_SKIP_MODERN + [
-        # block is a post-check optimization that inserts internal variables. The C++ type checker
-        # needs support for a proper optimizer for this to work.
-        "block_ext",
-    ],
+    skip_tests = _TESTS_TO_SKIP_MODERN + _TESTS_TO_SKIP_CHECKED,
+)
+
+gen_conformance_tests(
+    name = "conformance_legacy_checked",
+    checked = True,
+    data = _ALL_TESTS,
+    modern = False,
+    skip_tests = _TESTS_TO_SKIP_LEGACY + _TESTS_TO_SKIP_CHECKED,
+)
+
+# select optimization is only supported for checked expressions.
+gen_conformance_tests(
+    name = "conformance_legacy_select_opt",
+    checked = True,
+    data = _ALL_TESTS,
+    modern = False,
+    select_opt = True,
+    skip_tests = _TESTS_TO_SKIP_LEGACY + _TESTS_TO_SKIP_CHECKED,
+)
+
+gen_conformance_tests(
+    name = "conformance_select_opt",
+    checked = True,
+    data = _ALL_TESTS,
+    modern = True,
+    select_opt = True,
+    skip_tests = _TESTS_TO_SKIP_MODERN + _TESTS_TO_SKIP_CHECKED,
 )
 
 # Generates a bunch of `cc_test` whose names follow the pattern
