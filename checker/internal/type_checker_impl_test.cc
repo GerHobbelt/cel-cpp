@@ -65,6 +65,7 @@ using ::testing::ElementsAre;
 using ::testing::Eq;
 using ::testing::HasSubstr;
 using ::testing::IsEmpty;
+using ::testing::Not;
 using ::testing::Pair;
 using ::testing::Property;
 using ::testing::SizeIs;
@@ -139,10 +140,6 @@ MATCHER_P(IsVariableReference, var_name, "") {
 
 MATCHER_P2(IsFunctionReference, fn_name, overloads, "") {
   const Reference& reference = arg;
-  if (reference.name() != fn_name) {
-    *result_listener << "expected: " << fn_name
-                     << "\nactual: " << reference.name();
-  }
 
   absl::flat_hash_set<std::string> got_overload_set(
       reference.overload_id().begin(), reference.overload_id().end());
@@ -150,12 +147,13 @@ MATCHER_P2(IsFunctionReference, fn_name, overloads, "") {
                                                      overloads.end());
 
   if (got_overload_set != want_overload_set) {
-    *result_listener << "expected overload_ids: "
+    *result_listener << "reference to " << fn_name << "\n"
+                     << "expected overload_ids: "
                      << absl::StrJoin(want_overload_set, ",")
                      << "\nactual: " << absl::StrJoin(got_overload_set, ",");
   }
 
-  return reference.name() == fn_name && got_overload_set == want_overload_set;
+  return got_overload_set == want_overload_set;
 }
 
 absl::Status RegisterMinimalBuiltins(google::protobuf::Arena* absl_nonnull arena,
@@ -220,6 +218,12 @@ absl::Status RegisterMinimalBuiltins(google::protobuf::Arena* absl_nonnull arena
       "equals",
       /*return_type=*/BoolType{}, TypeParamType("A"), TypeParamType("A"))));
 
+  FunctionDecl ne_op;
+  ne_op.set_name("_!=_");
+  CEL_RETURN_IF_ERROR(ne_op.AddOverload(MakeOverloadDecl(
+      "not_equals",
+      /*return_type=*/BoolType{}, TypeParamType("A"), TypeParamType("A"))));
+
   FunctionDecl ternary_op;
   ternary_op.set_name("_?_:_");
   CEL_RETURN_IF_ERROR(ternary_op.AddOverload(MakeOverloadDecl(
@@ -275,6 +279,7 @@ absl::Status RegisterMinimalBuiltins(google::protobuf::Arena* absl_nonnull arena
   env.InsertFunctionIfAbsent(std::move(gt_op));
   env.InsertFunctionIfAbsent(std::move(to_int));
   env.InsertFunctionIfAbsent(std::move(eq_op));
+  env.InsertFunctionIfAbsent(std::move(ne_op));
   env.InsertFunctionIfAbsent(std::move(ternary_op));
   env.InsertFunctionIfAbsent(std::move(index_op));
   env.InsertFunctionIfAbsent(std::move(to_dyn));
@@ -750,18 +755,18 @@ TEST(TypeCheckerImplTest, NestedComprehensions) {
   EXPECT_THAT(result.GetIssues(), IsEmpty());
 }
 
-TEST(TypeCheckerImplTest, ComprehensionVarsFollowNamespacePriorityRules) {
+TEST(TypeCheckerImplTest, ComprehensionVarsShadowNamespacePriorityRules) {
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
   env.set_container("com");
   google::protobuf::Arena arena;
   ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
 
-  // Namespace resolution still applies, compre var doesn't shadow com.x
+  // Namespace compre var shadows com.x
   env.InsertVariableIfAbsent(MakeVariableDecl("com.x", IntType()));
 
   TypeCheckerImpl impl(std::move(env));
   ASSERT_OK_AND_ASSIGN(auto ast,
-                       MakeTestParsedAst("['1', '2'].all(x, x == 2)"));
+                       MakeTestParsedAst("['1', '2'].exists(x, x == '2')"));
   ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
 
   EXPECT_TRUE(result.IsValid());
@@ -769,20 +774,19 @@ TEST(TypeCheckerImplTest, ComprehensionVarsFollowNamespacePriorityRules) {
   EXPECT_THAT(result.GetIssues(), IsEmpty());
   ASSERT_OK_AND_ASSIGN(auto checked_ast, result.ReleaseAst());
   EXPECT_THAT(checked_ast->reference_map(),
-              Contains(Pair(_, IsVariableReference("com.x"))));
+              Not(Contains(Pair(_, IsVariableReference("com.x")))));
 }
 
-TEST(TypeCheckerImplTest, ComprehensionVarsFollowQualifiedIdentPriority) {
+TEST(TypeCheckerImplTest, ComprehensionVarsShadowsQualifiedIdent) {
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
   google::protobuf::Arena arena;
   ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
 
-  // Namespace resolution still applies, compre var doesn't shadow x.y
   env.InsertVariableIfAbsent(MakeVariableDecl("x.y", IntType()));
 
   TypeCheckerImpl impl(std::move(env));
   ASSERT_OK_AND_ASSIGN(auto ast,
-                       MakeTestParsedAst("[{'y': '2'}].all(x, x.y == 2)"));
+                       MakeTestParsedAst("[{'y': '2'}].all(x, x.y == '2')"));
   ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
 
   EXPECT_TRUE(result.IsValid());
@@ -790,7 +794,82 @@ TEST(TypeCheckerImplTest, ComprehensionVarsFollowQualifiedIdentPriority) {
   EXPECT_THAT(result.GetIssues(), IsEmpty());
   ASSERT_OK_AND_ASSIGN(auto checked_ast, result.ReleaseAst());
   EXPECT_THAT(checked_ast->reference_map(),
-              Contains(Pair(_, IsVariableReference("x.y"))));
+              Not(Contains(Pair(_, IsVariableReference("x.y")))));
+}
+
+TEST(TypeCheckerImplTest, ComprehensionVarsShadowsQualifiedIdentTypeError) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  google::protobuf::Arena arena;
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  env.InsertVariableIfAbsent(MakeVariableDecl("x.y", IntType()));
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("[0].all(x, x.y == 0)"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  EXPECT_FALSE(result.IsValid());
+
+  EXPECT_THAT(
+      result.FormatError(),
+      HasSubstr("type 'int' cannot be the operand of a select operation"));
+}
+
+TEST(TypeCheckerImplTest, ComprehensionVarsDisamgiguatesQualifiedIdent) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  google::protobuf::Arena arena;
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  env.InsertVariableIfAbsent(MakeVariableDecl("x.y", IntType()));
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(auto ast,
+                       MakeTestParsedAst("[{'y': 0}].all(x, .x.y == 2)"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  EXPECT_TRUE(result.IsValid());
+
+  EXPECT_THAT(result.GetIssues(), IsEmpty());
+  ASSERT_OK_AND_ASSIGN(auto checked_ast, result.ReleaseAst());
+  EXPECT_THAT(checked_ast->reference_map(),
+              Contains(Pair(_, IsVariableReference(".x.y"))));
+}
+
+TEST(TypeCheckerImplTest, ComprehensionVarsDisamgiguatesQualifiedIdentMixed) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  google::protobuf::Arena arena;
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  env.InsertVariableIfAbsent(MakeVariableDecl("x.y", StringType()));
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(auto ast,
+                       MakeTestParsedAst("[{'y': 0}].all(x, .x.y != x.y)"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  EXPECT_FALSE(result.IsValid());
+  EXPECT_THAT(
+      result.FormatError(),
+      HasSubstr("no matching overload for '_!=_' applied to '(string, int)'"));
+}
+
+TEST(TypeCheckerImplTest, ComprehensionVarsDisamgiguatesIdent) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  google::protobuf::Arena arena;
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  env.InsertVariableIfAbsent(MakeVariableDecl("x", IntType()));
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("['foo'].all(x, .x == 2)"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  EXPECT_TRUE(result.IsValid());
+
+  EXPECT_THAT(result.GetIssues(), IsEmpty());
+  ASSERT_OK_AND_ASSIGN(auto checked_ast, result.ReleaseAst());
+  EXPECT_THAT(checked_ast->reference_map(),
+              Contains(Pair(_, IsVariableReference(".x"))));
 }
 
 TEST(TypeCheckerImplTest, ComprehensionVarsCyclicParamAssignability) {

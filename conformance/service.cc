@@ -60,6 +60,7 @@
 #include "eval/public/cel_value.h"
 #include "eval/public/transform_utility.h"
 #include "extensions/bindings_ext.h"
+#include "extensions/comprehensions_v2.h"
 #include "extensions/comprehensions_v2_functions.h"
 #include "extensions/comprehensions_v2_macros.h"
 #include "extensions/encoders.h"
@@ -290,6 +291,8 @@ absl::Status CheckImpl(google::protobuf::Arena* arena,
         builder->AddLibrary(cel::extensions::MathCheckerLibrary()));
     CEL_RETURN_IF_ERROR(
         builder->AddLibrary(cel::extensions::EncodersCheckerLibrary()));
+    CEL_RETURN_IF_ERROR(
+        builder->AddLibrary(cel::extensions::ComprehensionsV2CheckerLibrary()));
   }
 
   for (const auto& decl : request.type_env()) {
@@ -377,6 +380,7 @@ class LegacyConformanceServiceImpl : public ConformanceServiceInterface {
     options.enable_heterogeneous_equality = true;
     options.enable_empty_wrapper_null_unboxing = true;
     options.enable_qualified_identifier_rewrites = true;
+    options.fail_on_warnings = false;
 
     if (optimize) {
       std::cerr << "Enabling optimizations" << std::endl;
@@ -565,6 +569,9 @@ class ModernConformanceServiceImpl : public ConformanceServiceInterface {
     options.enable_timestamp_duration_overflow_errors = true;
     options.enable_heterogeneous_equality = true;
     options.enable_empty_wrapper_null_unboxing = true;
+    // Planning warnings are expected in conformance tests, but the test expects
+    // failure to happen at evaluation time so we ignore them.
+    options.fail_on_warnings = false;
     if (recursive) {
       options.max_recursion_depth = 48;
     }

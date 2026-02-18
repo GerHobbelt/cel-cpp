@@ -156,10 +156,11 @@ cc_test(
         ":function_registry",
         "//common:function_descriptor",
         "//common:kind",
+        "//common:value",
         "//internal:testing",
-        "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/status",
-        "@com_google_protobuf//:protobuf",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
     ],
 )
 
@@ -505,13 +506,11 @@ cc_library(
         ":function",
         ":register_function_helper",
         "//common:function_descriptor",
-        "//common:kind",
         "//common:value",
         "//internal:status_macros",
         "//runtime/internal:function_adapter",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/functional:any_invocable",
-        "@com_google_absl//absl/functional:bind_front",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -588,7 +587,6 @@ cc_test(
         "//parser",
         "//parser:options",
         "//runtime/internal:runtime_impl",
-        "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
@@ -605,6 +603,7 @@ cc_library(
     ],
     deps = [
         "//common:value",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
@@ -648,5 +647,28 @@ cc_test(
         "@com_google_protobuf//:any_cc_proto",
         "@com_google_protobuf//:differencer",
         "@com_google_protobuf//:protobuf",
+    ],
+)
+
+cc_library(
+    name = "embedder_context",
+    hdrs = ["embedder_context.h"],
+    deps = [
+        "//common:typeinfo",
+        "//common:value",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/types:optional",
+    ],
+)
+
+cc_test(
+    name = "embedder_context_test",
+    srcs = ["embedder_context_test.cc"],
+    deps = [
+        ":embedder_context",
+        "//common:typeinfo",
+        "//internal:testing",
+        "@com_google_absl//absl/types:optional",
     ],
 )

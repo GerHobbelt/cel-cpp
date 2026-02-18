@@ -26,6 +26,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
@@ -234,6 +235,11 @@ class ResolveVisitor : public AstVisitorBase {
     bool namespace_rewrite;
   };
 
+  struct AttributeResolution {
+    const VariableDecl* decl;
+    bool requires_disambiguation;
+  };
+
   ResolveVisitor(absl::string_view container,
                  NamespaceGenerator namespace_generator,
                  const TypeCheckEnv& env, const Ast& ast,
@@ -246,7 +252,7 @@ class ResolveVisitor : public AstVisitorBase {
         inference_context_(&inference_context),
         issues_(&issues),
         ast_(&ast),
-        root_scope_(env.MakeVariableScope()),
+        root_scope_(),
         arena_(arena),
         current_scope_(&root_scope_) {}
 
@@ -294,7 +300,7 @@ class ResolveVisitor : public AstVisitorBase {
     return functions_;
   }
 
-  const absl::flat_hash_map<const Expr*, const VariableDecl*>& attributes()
+  const absl::flat_hash_map<const Expr*, AttributeResolution>& attributes()
       const {
     return attributes_;
   }
@@ -344,9 +350,13 @@ class ResolveVisitor : public AstVisitorBase {
                                                absl::string_view function_name,
                                                int arg_count, bool is_receiver);
 
-  // Resolves the function call shape (i.e. the number of arguments and call
-  // style) for the given function call.
-  const VariableDecl* absl_nullable LookupIdentifier(absl::string_view name);
+  // Resolves a global identifier (i.e. declared in the CEL environment).
+  const VariableDecl* absl_nullable LookupGlobalIdentifier(
+      absl::string_view name);
+
+  // Resolves a local identifier (i.e. a bind or comprehension var).
+  const VariableDecl* absl_nullable LookupLocalIdentifier(
+      absl::string_view name);
 
   // Resolves the applicable function overloads for the given function call.
   //
@@ -476,7 +486,7 @@ class ResolveVisitor : public AstVisitorBase {
 
   // References that were resolved and may require AST rewrites.
   absl::flat_hash_map<const Expr*, FunctionResolution> functions_;
-  absl::flat_hash_map<const Expr*, const VariableDecl*> attributes_;
+  absl::flat_hash_map<const Expr*, AttributeResolution> attributes_;
   absl::flat_hash_map<const Expr*, std::string> struct_types_;
 
   absl::flat_hash_map<const Expr*, Type> types_;
@@ -967,10 +977,20 @@ void ResolveVisitor::ResolveFunctionOverloads(const Expr& expr,
   types_[&expr] = resolution->result_type;
 }
 
-const VariableDecl* absl_nullable ResolveVisitor::LookupIdentifier(
+const VariableDecl* absl_nullable ResolveVisitor::LookupLocalIdentifier(
     absl::string_view name) {
-  if (const VariableDecl* decl = current_scope_->LookupVariable(name);
-      decl != nullptr) {
+  // Note: if we see a leading dot, this shouldn't resolve to a local variable,
+  // but we need to check whether we need to disambiguate against a global in
+  // the reference map.
+  if (absl::StartsWith(name, ".")) {
+    name = name.substr(1);
+  }
+  return current_scope_->LookupLocalVariable(name);
+}
+
+const VariableDecl* absl_nullable ResolveVisitor::LookupGlobalIdentifier(
+    absl::string_view name) {
+  if (const VariableDecl* decl = env_->LookupVariable(name); decl != nullptr) {
     return decl;
   }
   absl::StatusOr<absl::optional<VariableDecl>> constant =
@@ -996,22 +1016,34 @@ const VariableDecl* absl_nullable ResolveVisitor::LookupIdentifier(
 
 void ResolveVisitor::ResolveSimpleIdentifier(const Expr& expr,
                                              absl::string_view name) {
+  // Local variables (comprehension, bind) are simple identifiers so we can
+  // skip generating the different namespace-qualified candidates.
+  const VariableDecl* local_decl = LookupLocalIdentifier(name);
+
+  if (local_decl != nullptr && !absl::StartsWith(name, ".")) {
+    attributes_[&expr] = {local_decl, false};
+    types_[&expr] =
+        inference_context_->InstantiateTypeParams(local_decl->type());
+    return;
+  }
+
   const VariableDecl* decl = nullptr;
   namespace_generator_.GenerateCandidates(
       name, [&decl, this](absl::string_view candidate) {
-        decl = LookupIdentifier(candidate);
+        decl = LookupGlobalIdentifier(candidate);
         // continue searching.
         return decl == nullptr;
       });
 
-  if (decl == nullptr) {
-    ReportMissingReference(expr, name);
-    types_[&expr] = ErrorType();
+  if (decl != nullptr) {
+    attributes_[&expr] = {decl,
+                          /* requires_disambiguation= */ local_decl != nullptr};
+    types_[&expr] = inference_context_->InstantiateTypeParams(decl->type());
     return;
   }
 
-  attributes_[&expr] = decl;
-  types_[&expr] = inference_context_->InstantiateTypeParams(decl->type());
+  ReportMissingReference(expr, name);
+  types_[&expr] = ErrorType();
 }
 
 void ResolveVisitor::ResolveQualifiedIdentifier(
@@ -1021,18 +1053,28 @@ void ResolveVisitor::ResolveQualifiedIdentifier(
     return;
   }
 
-  const VariableDecl* absl_nullable decl = nullptr;
-  int segment_index_out = -1;
-  namespace_generator_.GenerateCandidates(
-      qualifiers, [&decl, &segment_index_out, this](absl::string_view candidate,
-                                                    int segment_index) {
-        decl = LookupIdentifier(candidate);
-        if (decl != nullptr) {
-          segment_index_out = segment_index;
-          return false;
-        }
-        return true;
-      });
+  // Local variables (comprehension, bind) are simple identifiers so we can
+  // skip generating the different namespace-qualified candidates.
+  const VariableDecl* local_decl = LookupLocalIdentifier(qualifiers[0]);
+  const VariableDecl* decl = nullptr;
+
+  int matched_segment_index = -1;
+
+  if (local_decl != nullptr && !absl::StartsWith(qualifiers[0], ".")) {
+    decl = local_decl;
+    matched_segment_index = 0;
+  } else {
+    namespace_generator_.GenerateCandidates(
+        qualifiers, [&decl, &matched_segment_index, this](
+                        absl::string_view candidate, int segment_index) {
+          decl = LookupGlobalIdentifier(candidate);
+          if (decl != nullptr) {
+            matched_segment_index = segment_index;
+            return false;
+          }
+          return true;
+        });
+  }
 
   if (decl == nullptr) {
     ReportMissingReference(expr, FormatCandidate(qualifiers));
@@ -1040,7 +1082,8 @@ void ResolveVisitor::ResolveQualifiedIdentifier(
     return;
   }
 
-  const int num_select_opts = qualifiers.size() - segment_index_out - 1;
+  const int num_select_opts = qualifiers.size() - matched_segment_index - 1;
+
   const Expr* root = &expr;
   std::vector<const Expr*> select_opts;
   select_opts.reserve(num_select_opts);
@@ -1049,7 +1092,9 @@ void ResolveVisitor::ResolveQualifiedIdentifier(
     root = &root->select_expr().operand();
   }
 
-  attributes_[root] = decl;
+  attributes_[root] = {decl,
+                       /* requires_disambiguation= */ decl != local_decl &&
+                           local_decl != nullptr};
   types_[root] = inference_context_->InstantiateTypeParams(decl->type());
 
   // fix-up select operations that were deferred.
@@ -1196,22 +1241,28 @@ class ResolveRewriter : public AstRewriterBase {
     bool rewritten = false;
     if (auto iter = visitor_.attributes().find(&expr);
         iter != visitor_.attributes().end()) {
-      const VariableDecl* decl = iter->second;
+      const VariableDecl* decl = iter->second.decl;
       auto& ast_ref = reference_map_[expr.id()];
-      ast_ref.set_name(decl->name());
+      std::string name = decl->name();
+      if (iter->second.requires_disambiguation &&
+          !absl::StartsWith(name, ".")) {
+        name = absl::StrCat(".", name);
+      }
+      ast_ref.set_name(name);
       if (decl->has_value()) {
         ast_ref.set_value(decl->value());
       }
-      expr.mutable_ident_expr().set_name(decl->name());
+      expr.mutable_ident_expr().set_name(std::move(name));
       rewritten = true;
     } else if (auto iter = visitor_.functions().find(&expr);
                iter != visitor_.functions().end()) {
       const FunctionDecl* decl = iter->second.decl;
       const bool needs_rewrite = iter->second.namespace_rewrite;
       auto& ast_ref = reference_map_[expr.id()];
-      ast_ref.set_name(decl->name());
+      if (options_.enable_function_name_in_reference) {
+        ast_ref.set_name(decl->name());
+      }
       for (const auto& overload : decl->overloads()) {
-        // TODO(uncreated-issue/72): narrow based on type inferences and shape.
         ast_ref.mutable_overload_id().push_back(overload.id());
       }
       expr.mutable_call_expr().set_function(decl->name());

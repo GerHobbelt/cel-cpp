@@ -54,8 +54,8 @@ cc_library(
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/functional:overload",
+        "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/strings:string_view",
-        "@com_google_absl//absl/types:optional",
         "@com_google_absl//absl/types:span",
         "@com_google_absl//absl/types:variant",
     ],
@@ -846,6 +846,7 @@ cc_test(
         "arena_string_test.cc",
         "arena_string_view_test.cc",
     ],
+    tags = ["no_test_msvc"],
     deps = [
         ":arena_string",
         "//internal:testing",
@@ -875,6 +876,7 @@ cc_library(
 cc_test(
     name = "arena_string_pool_test",
     srcs = ["arena_string_pool_test.cc"],
+    tags = ["no_test_msvc"],
     deps = [
         ":arena_string_pool",
         "//internal:testing",

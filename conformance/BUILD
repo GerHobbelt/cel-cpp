@@ -31,11 +31,9 @@ cc_library(
         "//checker:type_checker_builder_factory",
         "//common:ast",
         "//common:ast_proto",
-        "//common:decl",
         "//common:decl_proto_v1alpha1",
         "//common:expr",
         "//common:source",
-        "//common:type",
         "//common:value",
         "//common/internal:value_conversion",
         "//eval/public:activation",
@@ -46,6 +44,7 @@ cc_library(
         "//eval/public:cel_value",
         "//eval/public:transform_utility",
         "//extensions:bindings_ext",
+        "//extensions:comprehensions_v2",
         "//extensions:comprehensions_v2_functions",
         "//extensions:comprehensions_v2_macros",
         "//extensions:encoders",
@@ -147,6 +146,7 @@ _ALL_TESTS = [
     "@com_google_cel_spec//tests/simple:testdata/lists.textproto",
     "@com_google_cel_spec//tests/simple:testdata/logic.textproto",
     "@com_google_cel_spec//tests/simple:testdata/macros.textproto",
+    "@com_google_cel_spec//tests/simple:testdata/macros2.textproto",
     "@com_google_cel_spec//tests/simple:testdata/math_ext.textproto",
     "@com_google_cel_spec//tests/simple:testdata/namespace.textproto",
     "@com_google_cel_spec//tests/simple:testdata/optionals.textproto",
@@ -192,8 +192,10 @@ _TESTS_TO_SKIP_MODERN = [
     "enums/strong_proto2",
     "enums/strong_proto3",
 
-    # Not yet implemented.
-    "string_ext/type_errors",
+    # These depend on legacy US/ timezones. It's spotty if these are included with a normally
+    # configured timezone database.
+    "timestamps/timestamp_selectors_tz/getDayOfMonth_name_pos",
+    "timestamps/timestamp_selectors_tz/getDayOfYear",
 ]
 
 _TESTS_TO_SKIP_MODERN_DASHBOARD = [
@@ -234,14 +236,16 @@ _TESTS_TO_SKIP_LEGACY = [
     # Legacy value does not support optional_type.
     "optionals/optionals",
 
-    # Not yet implemented.
-    "string_ext/type_errors",
-
     # TODO(uncreated-issue/81): Fix null assignment to a field
     "proto2/set_null/list_value",
     "proto2/set_null/single_struct",
     "proto3/set_null/list_value",
     "proto3/set_null/single_struct",
+
+    # These depend on legacy US/ timezones. It's spotty if these are included with a normally
+    # configured timezone database.
+    "timestamps/timestamp_selectors_tz/getDayOfMonth_name_pos",
+    "timestamps/timestamp_selectors_tz/getDayOfYear",
 
     # cel.@block
     "block_ext/basic/optional_list",
