@@ -52,6 +52,7 @@
 #include "common/constant.h"
 #include "common/decl.h"
 #include "common/expr.h"
+#include "common/standard_definitions.h"
 #include "common/type.h"
 #include "common/type_kind.h"
 #include "internal/status_macros.h"
@@ -379,7 +380,7 @@ class ResolveVisitor : public AstVisitorBase {
 
       // Lookup message type by name to support WellKnownType creation.
       CEL_ASSIGN_OR_RETURN(
-          absl::optional<StructTypeField> field_info,
+          std::optional<StructTypeField> field_info,
           env_->LookupStructField(resolved_name, field.name()));
       if (!field_info.has_value()) {
         ReportUndefinedField(field.id(), field.name(), resolved_name);
@@ -405,8 +406,8 @@ class ResolveVisitor : public AstVisitorBase {
     return absl::OkStatus();
   }
 
-  absl::optional<Type> CheckFieldType(int64_t expr_id, const Type& operand_type,
-                                      absl::string_view field_name);
+  std::optional<Type> CheckFieldType(int64_t expr_id, const Type& operand_type,
+                                     absl::string_view field_name);
 
   void HandleOptSelect(const Expr& expr);
   void HandleBlockIndex(const Expr* expr);
@@ -894,8 +895,12 @@ const FunctionDecl* ResolveVisitor::ResolveFunctionCallShape(
         if (decl == nullptr) {
           return true;
         }
+        bool is_logical_op = (candidate == cel::StandardFunctions::kAnd ||
+                              candidate == cel::StandardFunctions::kOr) &&
+                             arg_count >= 2;
         for (const auto& ovl : decl->overloads()) {
-          if (ovl.member() == is_receiver && ovl.args().size() == arg_count) {
+          if (ovl.member() == is_receiver &&
+              (ovl.args().size() == arg_count || is_logical_op)) {
             return false;
           }
         }
@@ -919,7 +924,7 @@ void ResolveVisitor::ResolveFunctionOverloads(const Expr& expr,
     arg_types.push_back(GetDeducedType(&expr.call_expr().args()[i]));
   }
 
-  absl::optional<TypeInferenceContext::OverloadResolution> resolution =
+  std::optional<TypeInferenceContext::OverloadResolution> resolution =
       inference_context_->ResolveOverload(decl, arg_types, is_receiver);
 
   if (!resolution.has_value()) {
@@ -968,7 +973,7 @@ const VariableDecl* absl_nullable ResolveVisitor::LookupGlobalIdentifier(
   if (const VariableDecl* decl = env_->LookupVariable(name); decl != nullptr) {
     return decl;
   }
-  absl::StatusOr<absl::optional<VariableDecl>> constant =
+  absl::StatusOr<std::optional<VariableDecl>> constant =
       env_->LookupTypeConstant(arena_, name);
 
   if (!constant.ok()) {
@@ -1079,9 +1084,9 @@ void ResolveVisitor::ResolveQualifiedIdentifier(
   }
 }
 
-absl::optional<Type> ResolveVisitor::CheckFieldType(int64_t id,
-                                                    const Type& operand_type,
-                                                    absl::string_view field) {
+std::optional<Type> ResolveVisitor::CheckFieldType(int64_t id,
+                                                   const Type& operand_type,
+                                                   absl::string_view field) {
   if (operand_type.kind() == TypeKind::kDyn ||
       operand_type.kind() == TypeKind::kAny) {
     return DynType();
@@ -1137,7 +1142,7 @@ void ResolveVisitor::ResolveSelectOperation(const Expr& expr,
                                             const Expr& operand) {
   const Type& operand_type = GetDeducedType(&operand);
 
-  absl::optional<Type> result_type;
+  std::optional<Type> result_type;
   int64_t id = expr.id();
   // Support short-hand optional chaining.
   if (operand_type.IsOptional()) {
@@ -1184,7 +1189,7 @@ void ResolveVisitor::HandleOptSelect(const Expr& expr) {
     operand_type = operand_type.GetOptional().GetParameter();
   }
 
-  absl::optional<Type> field_type = CheckFieldType(
+  std::optional<Type> field_type = CheckFieldType(
       expr.id(), operand_type, field->const_expr().string_value());
   if (!field_type.has_value()) {
     types_[&expr] = ErrorType();
