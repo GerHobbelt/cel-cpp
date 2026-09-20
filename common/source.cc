@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -483,26 +484,26 @@ absl::optional<SourceLocation> Source::GetLocation(
     return SourceLocation{line_and_offset->first,
                           position - line_and_offset->second};
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 absl::optional<SourcePosition> Source::GetPosition(
     const SourceLocation& location) const {
   if (ABSL_PREDICT_FALSE(location.line < 1 || location.column < 0)) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   if (auto position = FindLinePosition(location.line);
       ABSL_PREDICT_TRUE(position.has_value())) {
     return *position + location.column;
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 absl::optional<std::string> Source::Snippet(int32_t line) const {
   auto content = this->content();
   auto start = FindLinePosition(line);
   if (ABSL_PREDICT_FALSE(!start.has_value() || content.empty())) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   auto end = FindLinePosition(line + 1);
   if (end.has_value()) {
@@ -554,7 +555,7 @@ std::string Source::DisplayErrorLocation(SourceLocation location) const {
 
 absl::optional<SourcePosition> Source::FindLinePosition(int32_t line) const {
   if (ABSL_PREDICT_FALSE(line < 1)) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   if (line == 1) {
     return SourcePosition{0};
@@ -563,13 +564,13 @@ absl::optional<SourcePosition> Source::FindLinePosition(int32_t line) const {
   if (ABSL_PREDICT_TRUE(line <= static_cast<int32_t>(line_offsets.size()))) {
     return line_offsets[static_cast<size_t>(line - 2)];
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 absl::optional<std::pair<int32_t, SourcePosition>> Source::FindLine(
     SourcePosition position) const {
   if (ABSL_PREDICT_FALSE(position < 0)) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   int32_t line = 1;
   const auto line_offsets = this->line_offsets();
@@ -583,6 +584,51 @@ absl::optional<std::pair<int32_t, SourcePosition>> Source::FindLine(
     return std::make_pair(line, SourcePosition{0});
   }
   return std::make_pair(line, line_offsets[static_cast<size_t>(line) - 2]);
+}
+
+SourceSubrange::SourceSubrange(const Source& source, SourceRange range)
+    : source_(source), range_(range) {
+  SourcePosition size = source_.content().size();
+  ABSL_DCHECK(range_.begin >= 0);
+  ABSL_DCHECK(range_.begin <= size);
+  ABSL_DCHECK(range_.end >= range_.begin);
+  ABSL_DCHECK(range_.end <= size);
+  if (range_.begin < 0) {
+    range_.begin = 0;
+  }
+  if (range_.begin > size) {
+    range_.begin = size;
+  }
+  if (range_.end < range_.begin) {
+    range_.end = range_.begin;
+  }
+  if (range_.end > size) {
+    range_.end = size;
+  }
+  for (const auto& line_offset : source_.line_offsets()) {
+    if (line_offset > range_.begin && line_offset <= range_.end) {
+      line_offsets_.push_back(line_offset - range_.begin);
+    }
+  }
+  line_offsets_.push_back(range_.end - range_.begin + 1);
+}
+
+SourceContentView SourceSubrange::content() const {
+  auto parent_content = source_.content();
+  if (parent_content.empty() || range_.begin >= range_.end) {
+    return EmptyContentView();
+  }
+  return absl::visit(
+      [this](auto view) {
+        return SourceContentView(
+            view.subspan(static_cast<size_t>(range_.begin),
+                         static_cast<size_t>(range_.end - range_.begin)));
+      },
+      parent_content.view_);
+}
+
+absl::Span<const SourcePosition> SourceSubrange::line_offsets() const {
+  return absl::MakeConstSpan(line_offsets_);
 }
 
 absl::StatusOr<absl_nonnull SourcePtr> NewSource(absl::string_view content,
