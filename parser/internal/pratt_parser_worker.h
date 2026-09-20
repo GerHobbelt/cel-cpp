@@ -16,6 +16,7 @@
 #define THIRD_PARTY_CEL_CPP_PARSER_INTERNAL_PRATT_PARSER_WORKER_H_
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -83,14 +84,12 @@ class ParserWorker {
   int64_t NextId(int32_t position);
   int64_t NextId(const Token& token) {
     int64_t id = NextId(token.start);
-    if (ABSL_PREDICT_FALSE(track_node_ranges_)) {
-      if (token.start >= 0 && token.end > token.start) {
-        node_ranges_[id] = {token.start, token.end - 1};
-      }
-    }
+    SetNodeRange(id, token.start,
+                 token.end > token.start ? token.end - 1 : token.start);
     return id;
   }
   int64_t NextId();
+  void SetPosition(int64_t id, const Token& token);
   int64_t CopyId(int64_t id);
   void EraseId(int64_t id);
   void SetNodeRange(int64_t id, int32_t begin, int32_t end) {
@@ -110,6 +109,7 @@ class ParserWorker {
   void ReportError(const Token& token, absl::string_view msg) {
     ReportError(token.start, msg);
   }
+  void ReportSyntaxError(const Token& token, absl::string_view msg);
 
   const cel::Source& source_;
   cel::ParserOptions options_;
@@ -149,6 +149,7 @@ template <typename ExprNode>
 class PrattParserWorker : public ParserWorker {
  public:
   using ParserWorker::NextId;
+  using ParserWorker::SetPosition;
 
   explicit PrattParserWorker(
       const cel::Source& source, const cel::ParserOptions& options,
@@ -335,7 +336,7 @@ ExprNode PrattParserWorker<ExprNode>::Parse() {
   }
   if (peek_token_.type != TokenType::kEnd &&
       peek_token_.type != TokenType::kError) {
-    ReportError(peek_token_, "unexpected token after expression");
+    ReportSyntaxError(peek_token_, "unexpected token after expression");
   }
   return expr;
 }
@@ -357,8 +358,8 @@ ExprNode PrattParserWorker<ExprNode>::ParseExpr() {
 
 template <typename ExprNode>
 void PrattParserWorker<ExprNode>::ParseTernary(ExprNode& lhs) {
-  NextToken();
-  int64_t op_id = NextId();
+  Token op_tok = NextToken();
+  int64_t op_id = NextId(op_tok);
   ExprNode true_expr = ParseBinaryAndTernary(1);
   if (!Expect(TokenType::kColon, "expected ':' in conditional expression")) {
     return;
@@ -462,7 +463,7 @@ void PrattParserWorker<ExprNode>::ParseSelectorChainTail(ExprNode& lhs) {
       if (id_tok.type != TokenType::kIdent &&
           id_tok.type != TokenType::kReservedWord) {
         if (id_tok.type != TokenType::kError) {
-          ReportError(id_tok, "expected identifier after '.'");
+          ReportSyntaxError(id_tok, "expected identifier after '.'");
         }
         SynchronizeOnDelimiter();
         return;
@@ -529,55 +530,61 @@ void PrattParserWorker<ExprNode>::ParseSelectorChainTail(ExprNode& lhs) {
 
 template <typename ExprNode>
 ExprNode PrattParserWorker<ExprNode>::ParseUnaryOpsChain(Token first_op) {
-  struct UnaryOpInfo {
-    TokenType type;
-    int64_t id;
+  struct UnaryOp {
+    Token token;
+    int64_t id = 0;
   };
-  std::vector<UnaryOpInfo> ops;
-  ops.push_back({first_op.type, NextId(first_op)});
-
+  std::vector<UnaryOp> ops;
+  ops.push_back({first_op});
   while (peek_token_.type == TokenType::kExclamation ||
          peek_token_.type == TokenType::kMinus) {
-    Token op = NextToken();
-    ops.push_back({op.type, NextId(op)});
+    ops.push_back({NextToken()});
+  }
+
+  const bool has_solitary_trailing_minus =
+      !ops.empty() && ops.back().token.type == TokenType::kMinus &&
+      (ops.size() == 1 || ops[ops.size() - 2].token.type != TokenType::kMinus);
+
+  if (options_.fold_unary_operators) {
+    size_t write = 0;
+    for (size_t read = 0; read < ops.size();) {
+      size_t next = read;
+      while (next < ops.size() &&
+             ops[next].token.type == ops[read].token.type) {
+        next++;
+      }
+      if ((next - read) % 2 != 0) {
+        ops[write++] = ops[read];
+      }
+      read = next;
+    }
+    ops.resize(write);
+  }
+
+  for (auto& op : ops) {
+    op.id = NextId(op.token);
   }
 
   ExprNode operand;
-  if (!ops.empty() && ops.back().type == TokenType::kMinus) {
-    if (options_.fold_unary_operators && ops.size() > 1 &&
-        ops[ops.size() - 2].type == TokenType::kMinus) {
-      // Match the ANTLR parser behavior where `-(-)+` prefers to match as
-      // repeated negate operators instead of a negation of an int literal.
-      // ---9223372036854775808 will fail to parse.
-      ops.pop_back();
-      ops.pop_back();
-      operand = ParseSelectorChain();
-    } else if (peek_token_.type == TokenType::kInt) {
-      int64_t op_id = ops.back().id;
-      ops.pop_back();
-      operand = ParseNegativeIntLiteral(op_id);
-    } else if (peek_token_.type == TokenType::kFloat) {
-      int64_t op_id = ops.back().id;
-      ops.pop_back();
-      operand = ParseNegativeDoubleLiteral(op_id);
-    } else {
-      operand = ParseSelectorChain();
-    }
+  // Match the ANTLR parser behavior where `-(-)+` prefers to match as
+  // repeated negate operators instead of a negation of an int literal.
+  // ---9223372036854775808 will fail to parse.
+  if (has_solitary_trailing_minus && (peek_token_.type == TokenType::kInt ||
+                                      peek_token_.type == TokenType::kFloat)) {
+    int64_t op_id = ops.back().id;
+    ops.pop_back();
+    operand = (peek_token_.type == TokenType::kInt)
+                  ? ParseNegativeIntLiteral(op_id)
+                  : ParseNegativeDoubleLiteral(op_id);
+    ParseSelectorChainTail(operand);
   } else {
     operand = ParseSelectorChain();
   }
 
   for (int i = static_cast<int>(ops.size()) - 1; i >= 0; --i) {
     std::vector<ExprNode> args;
-    if (options_.fold_unary_operators && i > 0) {
-      if (ops[i - 1].type == ops[i].type) {
-        i--;
-        continue;
-      }
-    }
-
     args.push_back(std::move(operand));
-    absl::string_view op_name = (ops[i].type == TokenType::kExclamation)
+    absl::string_view op_name = (ops[i].token.type == TokenType::kExclamation)
                                     ? CelOperator::LOGICAL_NOT
                                     : CelOperator::NEGATE;
     operand =
@@ -641,7 +648,7 @@ ExprNode PrattParserWorker<ExprNode>::ParseIdentOrCall() {
   if (id_tok.type != TokenType::kIdent &&
       id_tok.type != TokenType::kReservedWord) {
     if (id_tok.type != TokenType::kError) {
-      ReportError(id_tok, "expected identifier");
+      ReportSyntaxError(id_tok, "expected identifier");
     }
     return ast_factory_.NewUnspecified(NextId(id_tok));
   }
@@ -653,16 +660,17 @@ ExprNode PrattParserWorker<ExprNode>::ParseIdentOrCall() {
   }
   std::string name =
       leading_dot ? absl::StrCat(".", id_text) : std::string(id_text);
-  int64_t id = NextId(leading_dot ? first_tok : id_tok);
   if (peek_token_.type == TokenType::kLeftParen) {
-    NextToken();
+    Token lparen = NextToken();
+    int64_t call_id = NextId(lparen);
     std::vector<ExprNode> args = ParseArguments(TokenType::kRightParen);
-    if (auto expanded = TryExpandMacro(id, name, nullptr, args);
+    if (auto expanded = TryExpandMacro(call_id, name, nullptr, args);
         expanded.has_value()) {
       return std::move(*expanded);
     }
-    return ast_factory_.NewCall(id, name, std::move(args));
+    return ast_factory_.NewCall(call_id, name, std::move(args));
   }
+  int64_t id = NextId(leading_dot ? first_tok : id_tok);
   return ast_factory_.NewIdent(id, std::move(name));
 }
 
@@ -715,11 +723,10 @@ ExprNode PrattParserWorker<ExprNode>::ParsePrimary() {
       Token bad_tok = NextToken();
       if (bad_tok.type != TokenType::kError) {
         if (bad_tok.type == TokenType::kEnd) {
-          ReportError(
-              bad_tok,
-              "Syntax error: mismatched input '<EOF>' expecting expression");
+          ReportSyntaxError(bad_tok,
+                            "mismatched input '<EOF>' expecting expression");
         } else {
-          ReportError(bad_tok, "unexpected token");
+          ReportSyntaxError(bad_tok, "unexpected token");
         }
       }
       return ast_factory_.NewUnspecified(NextId(bad_tok));
@@ -774,12 +781,13 @@ ExprNode PrattParserWorker<ExprNode>::ParseMap() {
       }
       key_start = peek_token_;
     }
+    int64_t entry_id = NextId();
     ExprNode key = ParseExpr();
     Token colon = peek_token_;
     if (!Expect(TokenType::kColon, "expected ':' in map entry")) {
       break;
     }
-    int64_t entry_id = NextId(colon);
+    SetPosition(entry_id, colon);
     builder.Add(entry_id, std::move(key), ParseExpr(), optional);
     if (peek_token_.type == TokenType::kComma) {
       NextToken();
@@ -813,7 +821,7 @@ ExprNode PrattParserWorker<ExprNode>::ParseStruct(
     Token field_tok = NextToken();
     if (field_tok.type != TokenType::kIdent &&
         field_tok.type != TokenType::kReservedWord) {
-      ReportError(field_tok, "expected struct field name");
+      ReportSyntaxError(field_tok, "expected struct field name");
       SynchronizeOnDelimiter();
       break;
     }
@@ -852,6 +860,7 @@ std::vector<ExprNode> PrattParserWorker<ExprNode>::ParseArguments(
       if (peek_token_.type == TokenType::kComma) {
         NextToken();
         if (peek_token_.type == close_token) {
+          ReportError(peek_token_, "unexpected token");
           break;
         }
         continue;
@@ -876,7 +885,7 @@ ExprNode PrattParserWorker<ExprNode>::ParseIntLiteral() {
   } else if (absl::SimpleAtoi(value, &int_val)) {
     return ast_factory_.NewIntConst(NextId(tok), int_val);
   }
-  ReportError(tok, "invalid int literal");
+  ReportSyntaxError(tok, "invalid int literal");
   return ast_factory_.NewUnspecified(NextId(tok));
 }
 
@@ -910,7 +919,7 @@ ExprNode PrattParserWorker<ExprNode>::ParseNegativeIntLiteral(int64_t node_id) {
   if (success) {
     return ast_factory_.NewIntConst(node_id, int_val);
   }
-  ReportError(lit_tok, "invalid int literal");
+  ReportSyntaxError(lit_tok, "invalid int literal");
   return ast_factory_.NewUnspecified(NextId(lit_tok));
 }
 
@@ -930,7 +939,7 @@ ExprNode PrattParserWorker<ExprNode>::ParseUintLiteral() {
   } else if (absl::SimpleAtoi(value, &uint_val)) {
     return ast_factory_.NewUintConst(NextId(tok), uint_val);
   }
-  ReportError(tok, "invalid uint literal");
+  ReportSyntaxError(tok, "invalid uint literal");
   return ast_factory_.NewUnspecified(NextId(tok));
 }
 
@@ -943,7 +952,7 @@ ExprNode PrattParserWorker<ExprNode>::ParseDoubleLiteral() {
   if (absl::SimpleAtod(value, &double_val)) {
     return ast_factory_.NewDoubleConst(NextId(tok), double_val);
   }
-  ReportError(tok, "invalid double literal");
+  ReportSyntaxError(tok, "invalid double literal");
   return ast_factory_.NewUnspecified(NextId(tok));
 }
 
@@ -955,7 +964,7 @@ ExprNode PrattParserWorker<ExprNode>::ParseNegativeDoubleLiteral(
   if (absl::SimpleAtod(GetTokenText(lit_tok), &double_val)) {
     return ast_factory_.NewDoubleConst(node_id, -double_val);
   }
-  ReportError(lit_tok, "invalid double literal");
+  ReportSyntaxError(lit_tok, "invalid double literal");
   return ast_factory_.NewUnspecified(NextId(lit_tok));
 }
 
@@ -1213,7 +1222,7 @@ int PrattParserWorker<ExprNode>::CountGroupingParentheses() {
   }
 
   // Save lexer position to restore after scanning ahead.
-  const Lexer::Position saved_pos = lexer_.SavePosition();
+  const int32_t saved_pos = lexer_.SavePosition();
   auto restore_lexer = absl::MakeCleanup(
       [this, saved_pos] { lexer_.RestorePosition(saved_pos); });
 

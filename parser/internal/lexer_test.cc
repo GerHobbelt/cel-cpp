@@ -14,6 +14,7 @@
 
 #include "parser/internal/lexer.h"
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -334,29 +335,23 @@ TEST(LexerTest, LineOffsets) {
   EXPECT_EQ(line_offsets[1], 13);
 }
 
-TEST(LexerTest, LineOffsetsInStringsAndIdentifiers) {
-  std::string_view source_text =
-      "'''multi\nline'''\n\"another\nline\"\n`ident\nhere`";
+TEST(LexerTest, LineOffsetsInMultilineStrings) {
+  std::string_view source_text = "'''multi\nline'''\n\"\"\"another\nline\"\"\"";
   ASSERT_OK_AND_ASSIGN(auto source, cel::NewSource(source_text));
   Lexer lexer(*source);
 
   EXPECT_THAT(lexer.Lex(),
               IsToken(source.get(), TokenType::kString, "'''multi\nline'''"));
   EXPECT_THAT(lexer.Lex(), IsToken(source.get(), TokenType::kWhitespace, "\n"));
-  EXPECT_THAT(lexer.Lex(),
-              IsToken(source.get(), TokenType::kString, "\"another\nline\""));
-  EXPECT_THAT(lexer.Lex(), IsToken(source.get(), TokenType::kWhitespace, "\n"));
-  EXPECT_THAT(lexer.Lex(),
-              IsToken(source.get(), TokenType::kIdent, "`ident\nhere`"));
+  EXPECT_THAT(lexer.Lex(), IsToken(source.get(), TokenType::kString,
+                                   "\"\"\"another\nline\"\"\""));
   EXPECT_THAT(lexer.Lex(), IsToken(source.get(), TokenType::kEnd, ""));
 
   auto line_offsets = source->line_offsets();
-  ASSERT_GE(line_offsets.size(), 5);
+  ASSERT_GE(line_offsets.size(), 3);
   EXPECT_EQ(line_offsets[0], 9);
   EXPECT_EQ(line_offsets[1], 17);
-  EXPECT_EQ(line_offsets[2], 26);
-  EXPECT_EQ(line_offsets[3], 32);
-  EXPECT_EQ(line_offsets[4], 39);
+  EXPECT_EQ(line_offsets[2], 28);
 }
 
 struct LexerErrorTestCase {
@@ -391,6 +386,12 @@ INSTANTIATE_TEST_SUITE_P(
             .expected_error_message = "unterminated string literal",
             .expected_error_location = "\n | \"unterminated"
                                        "\n | .............^",
+        },
+        LexerErrorTestCase{
+            .source = "\"another\nline\"",
+            .expected_error_message = "unterminated string literal",
+            .expected_error_location = "\n | \"another"
+                                       "\n | ........^",
         },
         LexerErrorTestCase{
             .source = "0x",
@@ -438,6 +439,12 @@ INSTANTIATE_TEST_SUITE_P(
             .expected_error_message = "unterminated quoted identifier",
             .expected_error_location = "\n | `unterminated quoted"
                                        "\n | ....................^",
+        },
+        LexerErrorTestCase{
+            .source = "`ident\nhere`",
+            .expected_error_message = "unterminated quoted identifier",
+            .expected_error_location = "\n | `ident"
+                                       "\n | ......^",
         },
         LexerErrorTestCase{
             .source = "'''unterminated multi",
@@ -506,7 +513,7 @@ TEST(LexerPositionTest, SaveAndRestorePosition) {
   EXPECT_EQ(tok2.type, TokenType::kWhitespace);
 
   // Save position before '+'
-  Lexer::Position saved = lexer.SavePosition();
+  int32_t saved = lexer.SavePosition();
 
   Token tok3 = lexer.Lex();
   EXPECT_EQ(tok3.type, TokenType::kPlus);

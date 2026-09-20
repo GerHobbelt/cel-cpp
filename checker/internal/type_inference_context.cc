@@ -153,6 +153,19 @@ std::optional<Type> WrapperToPrimitive(const Type& t) {
   }
 }
 
+// Tests whether the type contains any type params directly or transitively.
+bool HasTypeParam(const Type& type) {
+  if (type.kind() == TypeKind::kTypeParam) {
+    return true;
+  }
+  for (const auto& param : type.GetParameters()) {
+    if (HasTypeParam(param)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 Type TypeInferenceContext::InstantiateTypeParams(const Type& type) {
@@ -186,7 +199,8 @@ Type TypeInferenceContext::InstantiateTypeParams(
     case TypeKind::kUintWrapper:
       return type;
     case TypeKind::kTypeParam: {
-      absl::string_view name = type.AsTypeParam()->name();
+      TypeParamType type_param = type.GetTypeParam();
+      absl::string_view name = type_param.name();
       if (IsTypeVar(name)) {
         // Already instantiated (e.g. list comprehension variable).
         return type;
@@ -252,6 +266,26 @@ bool TypeInferenceContext::IsAssignableInternal(
   Type to_subs = Substitute(to, prospective_substitutions);
   Type from_subs = Substitute(from, prospective_substitutions);
 
+  if (from_subs.kind() == TypeKind::kType &&
+      to_subs.kind() == TypeKind::kType) {
+    Type from_inner = from_subs.AsType()->GetType();
+    Type to_inner = to_subs.AsType()->GetType();
+    // If either type contains a type parameter (e.g., type(T) in foo(data,
+    // type(T)) -> T), delegate to inner type unification to bind or validate
+    // type parameter substitutions. Returns true if the inner types
+    // structurally match, unify with an unbound type param, or conform to an
+    // existing binding in 'prospective_substitutions'. Returns false on
+    // structural/kind mismatches (e.g., int vs list(T)), occurs-check cycles,
+    // or conflicting type param bindings.
+    if (HasTypeParam(from_inner) || HasTypeParam(to_inner)) {
+      return IsAssignableInternal(from_inner, to_inner,
+                                  prospective_substitutions);
+    }
+    // Concrete types are coassignable in CEL (e.g., type(1) == type("a"),
+    // type([1]) == list).
+    return true;
+  }
+
   // Types always assignable to themselves.
   // Remainder is checking for assignability across different types.
   if (to_subs == from_subs) {
@@ -311,13 +345,6 @@ bool TypeInferenceContext::IsAssignableInternal(
     if (to_subs.IsNull() && IsLegacyNullable(from_subs)) {
       return true;
     }
-  }
-
-  if (from_subs.kind() == TypeKind::kType &&
-      to_subs.kind() == TypeKind::kType) {
-    // Types are always assignable to themselves (even if differently
-    // parameterized).
-    return true;
   }
 
   if (to_subs.kind() == TypeKind::kEnum && from_subs.kind() == TypeKind::kInt) {
@@ -468,7 +495,8 @@ bool TypeInferenceContext::OccursWithin(
   // T3 -> T2 -> null_type;
   Type substitution = type;
   while (substitution.kind() == TypeKind::kTypeParam) {
-    absl::string_view param_name = substitution.AsTypeParam()->name();
+    TypeParamType type_param = substitution.GetTypeParam();
+    absl::string_view param_name = type_param.name();
     if (param_name == var_name) {
       return true;
     }
@@ -508,7 +536,8 @@ bool TypeInferenceContext::IsAssignableWithConstraints(
   }
 
   if (to.kind() == TypeKind::kTypeParam) {
-    absl::string_view name = to.AsTypeParam()->name();
+    TypeParamType to_param = to.GetTypeParam();
+    absl::string_view name = to_param.name();
     if (!OccursWithin(name, from, prospective_substitutions)) {
       prospective_substitutions[name] = from;
       return true;
@@ -516,7 +545,8 @@ bool TypeInferenceContext::IsAssignableWithConstraints(
   }
 
   if (from.kind() == TypeKind::kTypeParam) {
-    absl::string_view name = from.AsTypeParam()->name();
+    TypeParamType from_param = from.GetTypeParam();
+    absl::string_view name = from_param.name();
     if (!OccursWithin(name, to, prospective_substitutions)) {
       prospective_substitutions[name] = to;
       return true;
@@ -637,11 +667,12 @@ Type TypeInferenceContext::FullySubstitute(const Type& type,
       return MapType(arena_, key, value);
     }
     case TypeKind::kOpaque: {
+      OpaqueType opaque_type = type.GetOpaque();
       std::vector<Type> types;
-      for (const auto& param : type.AsOpaque()->GetParameters()) {
+      for (const auto& param : opaque_type.GetParameters()) {
         types.push_back(FullySubstitute(param, free_to_dyn));
       }
-      return OpaqueType(arena_, type.AsOpaque()->name(), types);
+      return OpaqueType(arena_, opaque_type.name(), types);
     }
     default:
       return type;

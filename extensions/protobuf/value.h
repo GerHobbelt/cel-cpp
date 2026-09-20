@@ -56,6 +56,7 @@ ProtoMessageToValue(T&& value,
                             message_factory, arena);
 }
 
+// Unwraps a protobuf message from a cel::Value.
 inline absl::Status ProtoMessageFromValue(const Value& value,
                                           google::protobuf::Message& dest_message) {
   const auto* dest_descriptor = dest_message.GetDescriptor();
