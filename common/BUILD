@@ -25,6 +25,7 @@ cc_library(
     hdrs = ["ast.h"],
     deps = [
         ":expr",
+        ":source",
         "//common/ast:metadata",
         "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/base:nullability",
@@ -39,6 +40,7 @@ cc_test(
     deps = [
         ":ast",
         ":expr",
+        ":source",
         "//internal:testing",
         "@com_google_absl//absl/container:flat_hash_map",
     ],
@@ -541,16 +543,14 @@ cc_library(
         ],
     ) + [
         "type.h",
-        "type_factory.h",
         "type_introspector.h",
-        "type_manager.h",
     ],
     deps = [
-        ":memory",
         ":type_kind",
         "//internal:string_pool",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",

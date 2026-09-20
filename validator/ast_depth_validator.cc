@@ -1,4 +1,4 @@
-// Copyright 2023 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,19 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_CEL_CPP_COMMON_TYPE_FACTORY_H_
-#define THIRD_PARTY_CEL_CPP_COMMON_TYPE_FACTORY_H_
+#include "validator/ast_depth_validator.h"
+
+#include "absl/strings/str_cat.h"
+#include "validator/validator.h"
 
 namespace cel {
 
-// `TypeFactory` is the preferred way for constructing compound types such as
-// lists, maps, structs, and opaques. It caches types and avoids constructing
-// them multiple times.
-class TypeFactory {
- public:
-  virtual ~TypeFactory() = default;
-};
+Validation AstDepthValidator(int max_depth) {
+  return Validation([max_depth](ValidationContext& context) {
+    int height = context.navigable_ast().Root().height();
+    if (height > max_depth) {
+      context.ReportError(absl::StrCat("AST depth ", height,
+                                       " exceeds maximum of ", max_depth));
+      return false;
+    }
+    return true;
+  });
+}
 
 }  // namespace cel
-
-#endif  // THIRD_PARTY_CEL_CPP_COMMON_TYPE_FACTORY_H_

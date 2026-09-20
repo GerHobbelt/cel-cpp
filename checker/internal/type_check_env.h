@@ -28,6 +28,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 #include "absl/types/span.h"
+#include "checker/internal/descriptor_pool_type_introspector.h"
 #include "common/constant.h"
 #include "common/decl.h"
 #include "common/type.h"
@@ -91,15 +92,13 @@ class TypeCheckEnv {
           descriptor_pool)
       : descriptor_pool_(std::move(descriptor_pool)),
         container_(""),
-        parent_(nullptr) {}
-
-  TypeCheckEnv(absl_nonnull std::shared_ptr<const google::protobuf::DescriptorPool>
-                   descriptor_pool,
-               std::shared_ptr<google::protobuf::Arena> arena)
-      : descriptor_pool_(std::move(descriptor_pool)),
-        arena_(std::move(arena)),
-        container_(""),
-        parent_(nullptr) {}
+        proto_type_introspector_(
+            std::make_shared<DescriptorPoolTypeIntrospector>(
+                descriptor_pool_.get())) {
+    type_providers_.push_back(
+        std::make_shared<cel::WellKnownTypeIntrospector>());
+    type_providers_.push_back(proto_type_introspector_);
+  }
 
   // Move-only.
   TypeCheckEnv(TypeCheckEnv&&) = default;
@@ -109,6 +108,13 @@ class TypeCheckEnv {
 
   void set_container(std::string container) {
     container_ = std::move(container);
+  }
+
+  const DescriptorPoolTypeIntrospector& proto_type_introspector() const {
+    return *proto_type_introspector_;
+  }
+  DescriptorPoolTypeIntrospector& proto_type_introspector() {
+    return *proto_type_introspector_;
   }
 
   void set_expected_type(const Type& type) { expected_type_ = std::move(type); }
@@ -163,9 +169,6 @@ class TypeCheckEnv {
     functions_[decl.name()] = std::move(decl);
   }
 
-  const TypeCheckEnv* absl_nullable parent() const { return parent_; }
-  void set_parent(TypeCheckEnv* parent) { parent_ = parent; }
-
   // Returns the declaration for the given name if it is found in the current
   // or any parent scope.
   // Note: the returned declaration ptr is only valid as long as no changes are
@@ -184,10 +187,6 @@ class TypeCheckEnv {
   absl::StatusOr<absl::optional<VariableDecl>> LookupTypeConstant(
       google::protobuf::Arena* absl_nonnull arena, absl::string_view type_name) const;
 
-  TypeCheckEnv MakeExtendedEnvironment() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return TypeCheckEnv(this);
-  }
-
   const google::protobuf::DescriptorPool* absl_nonnull descriptor_pool() const {
     return descriptor_pool_.get();
   }
@@ -200,19 +199,17 @@ class TypeCheckEnv {
   }
 
  private:
-  explicit TypeCheckEnv(const TypeCheckEnv* absl_nonnull parent)
-      : descriptor_pool_(parent->descriptor_pool_),
-        container_(parent != nullptr ? parent->container() : ""),
-        parent_(parent) {}
-
   absl::StatusOr<absl::optional<VariableDecl>> LookupEnumConstant(
       absl::string_view type, absl::string_view value) const;
 
   absl_nonnull std::shared_ptr<const google::protobuf::DescriptorPool> descriptor_pool_;
+
   // If set, an arena was needed to allocate types in the environment.
   absl_nullable std::shared_ptr<const google::protobuf::Arena> arena_;
   std::string container_;
-  const TypeCheckEnv* absl_nullable parent_;
+
+  // Used to resolve fields on message types.
+  std::shared_ptr<DescriptorPoolTypeIntrospector> proto_type_introspector_;
 
   // Maps fully qualified names to declarations.
   absl::flat_hash_map<std::string, VariableDecl> variables_;
