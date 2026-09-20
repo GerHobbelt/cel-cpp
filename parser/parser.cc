@@ -1104,7 +1104,7 @@ std::any ParserVisitor::visitCreateMessage(
   } else {
     name = absl::StrJoin(parts, ".");
   }
-  int64_t obj_id = factory_.NextId(SourceRangeFromToken(ctx->op));
+  int64_t obj_id = factory_.NextId(SourceRangeFromParserRuleContext(ctx));
   std::vector<StructExprField> fields;
   if (ctx->entries) {
     fields = visitFields(ctx->entries);
@@ -1206,7 +1206,7 @@ std::any ParserVisitor::visitNested(CelParser::NestedContext* ctx) {
 }
 
 std::any ParserVisitor::visitCreateList(CelParser::CreateListContext* ctx) {
-  int64_t list_id = factory_.NextId(SourceRangeFromToken(ctx->op));
+  int64_t list_id = factory_.NextId(SourceRangeFromParserRuleContext(ctx));
   auto elems = visitList(ctx->elems);
   return ExprToAny(factory_.NewList(list_id, std::move(elems)));
 }
@@ -1244,7 +1244,7 @@ std::vector<Expr> ParserVisitor::visitList(CelParser::ExprListContext* ctx) {
 }
 
 std::any ParserVisitor::visitCreateMap(CelParser::CreateMapContext* ctx) {
-  int64_t struct_id = factory_.NextId(SourceRangeFromToken(ctx->op));
+  int64_t struct_id = factory_.NextId(SourceRangeFromParserRuleContext(ctx));
   std::vector<MapExprEntry> entries;
   if (ctx->entries) {
     entries = visitEntries(ctx->entries);
@@ -1468,11 +1468,11 @@ Expr ParserVisitor::GlobalCallOrMacroImpl(int64_t expr_id,
       }
     }
     factory_.BeginMacro(factory_.GetSourceRange(expr_id));
-    auto expr = macro->Expand(factory_, absl::nullopt, absl::MakeSpan(args));
+    auto expr = macro->Expand(factory_, std::nullopt, absl::MakeSpan(args));
     factory_.EndMacro();
     if (expr) {
       if (add_macro_calls_) {
-        factory_.AddMacroCall(expr->id(), function, absl::nullopt,
+        factory_.AddMacroCall(expr->id(), function, std::nullopt,
                               std::move(macro_args));
       }
       // We did not end up using `expr_id`. Delete metadata.

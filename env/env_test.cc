@@ -282,6 +282,15 @@ INSTANTIATE_TEST_SUITE_P(
         },
         StandardLibraryConfigTestCase{
             .standard_library_config =
+                {.excluded_functions = {{"_+_", "_+_(bytes,bytes)"},
+                                        {"_+_", "_+_(list<~A>,list<~A>)"},
+                                        {"_+_", "_+_(string,string)"}}},
+            .expected_valid_expressions = {"1 + 2"},
+            .expected_invalid_expressions = {"[1, 2, 3] + [4, 5, 6]",
+                                             "'hello' + 'world'"},
+        },
+        StandardLibraryConfigTestCase{
+            .standard_library_config =
                 {.excluded_functions = {{"_+_", "add_bytes"},
                                         {"_+_", "add_list"},
                                         {"_+_", "add_string"}}},
@@ -293,6 +302,13 @@ INSTANTIATE_TEST_SUITE_P(
             .standard_library_config = {.included_functions = {{"_+_", ""}}},
             .expected_valid_expressions = {"1 + 2", "[1, 2, 3] + [4, 5, 6]",
                                            "'hello' + 'world'"},
+        },
+        StandardLibraryConfigTestCase{
+            .standard_library_config =
+                {.included_functions = {{"_+_", "_+_(int,int)"},
+                                        {"_+_", "_+_(list<~A>,list<~A>)"}}},
+            .expected_valid_expressions = {"1 + 2", "[1, 2, 3] + [4, 5, 6]"},
+            .expected_invalid_expressions = {"'hello' + 'world'"},
         },
         StandardLibraryConfigTestCase{
             .standard_library_config =
@@ -342,6 +358,25 @@ TEST(ContainerConfigTest, ContainerConfigWithAliases) {
   ASSERT_OK_AND_ASSIGN(auto result, compiler->Compile("MyTestType{}"));
 
   EXPECT_THAT(result.GetIssues(), IsEmpty()) << result.FormatError();
+}
+
+TEST(ContextVariableConfigTest, Basic) {
+  Env env;
+  env.SetDescriptorPool(internal::GetSharedTestingDescriptorPool());
+  Config config;
+  config.SetContextType("cel.expr.conformance.proto3.TestAllTypes");
+  env.SetConfig(config);
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Compiler> compiler, env.NewCompiler());
+
+  // Top-level fields of TestAllTypes like "single_int32" should resolve
+  // successfully.
+  ASSERT_OK_AND_ASSIGN(auto result, compiler->Compile("single_int32 > 10"));
+  EXPECT_THAT(result.GetIssues(), IsEmpty());
+
+  ASSERT_OK_AND_ASSIGN(auto result_invalid,
+                       compiler->Compile("non_existent_field > 10"));
+  EXPECT_THAT(result_invalid.GetIssues(), Not(IsEmpty()));
 }
 
 struct VariableConfigWithValueTestCase {

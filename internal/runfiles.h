@@ -11,12 +11,15 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Utilities for working with bazel runfiles.
 
 #ifndef THIRD_PARTY_CEL_CPP_INTERNAL_RUNFILES_H_
 #define THIRD_PARTY_CEL_CPP_INTERNAL_RUNFILES_H_
 
 #include <string>
 
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 
 namespace cel::internal {
@@ -24,6 +27,9 @@ namespace cel::internal {
 // Resolves a path relative to the runfiles directory.
 // Intended for resolving test cases from cel-spec and cel-policy.
 std::string ResolveRunfilesPath(absl::string_view path);
+
+// Read contents of a file at a resolved path to a string.
+absl::Status GetFileContents(absl::string_view path, std::string* out);
 
 }  // namespace cel::internal
 

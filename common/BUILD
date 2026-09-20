@@ -80,6 +80,42 @@ cc_test(
 )
 
 cc_library(
+    name = "signature",
+    srcs = ["signature.cc"],
+    hdrs = ["signature.h"],
+    deps = [
+        ":ast",
+        ":type",
+        ":type_spec_resolver",
+        "//internal:status_macros",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:optional",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "signature_test",
+    srcs = ["signature_test.cc"],
+    deps = [
+        ":ast",
+        ":signature",
+        ":type",
+        ":type_kind",
+        ":type_spec_resolver",
+        "//internal:testing",
+        "//internal:testing_descriptor_pool",
+        "@com_google_absl//absl/base:no_destructor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+cc_library(
     name = "expr",
     srcs = ["expr.cc"],
     hdrs = ["expr.h"],
@@ -145,15 +181,14 @@ cc_library(
     hdrs = ["decl.h"],
     deps = [
         ":constant",
+        ":signature",
         ":type",
         ":type_kind",
-        "//common/internal:signature",
         "//internal:status_macros",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
-        "@com_google_absl//absl/hash",
-        "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -601,6 +636,17 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "format_type_name",
+    srcs = ["format_type_name.cc"],
+    hdrs = ["format_type_name.h"],
+    deps = [
+        ":type",
+        ":type_kind",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
 cc_test(
     name = "type_test",
     srcs = glob([
@@ -619,6 +665,18 @@ cc_test(
         "@com_google_absl//absl/hash:hash_testing",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/log:die_if_null",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "format_type_name_test",
+    srcs = ["format_type_name_test.cc"],
+    deps = [
+        ":format_type_name",
+        ":type",
+        "//internal:testing",
+        "@com_google_cel_spec//proto/cel/expr/conformance/proto2:test_all_types_cc_proto",
         "@com_google_protobuf//:protobuf",
     ],
 )

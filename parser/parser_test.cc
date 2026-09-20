@@ -631,6 +631,27 @@ std::vector<TestInfo> test_cases = {
      "ERROR: <input>:1:7: all() variable name must be a simple identifier\n"
      " | 1.all(2, 3)\n"
      " | ......^"},
+    {"[].all(.x, x)", "",
+     "ERROR: <input>:1:9: all() variable name must be a simple identifier\n"
+     " | [].all(.x, x)\n"
+     " | ........^"},
+    {"[].exists(.x, x)", "",
+     "ERROR: <input>:1:12: exists() variable name must be a simple identifier\n"
+     " | [].exists(.x, x)\n"
+     " | ...........^"},
+    {"[].exists_one(.x, x)", "",
+     "ERROR: <input>:1:16: exists_one() variable name must be a simple "
+     "identifier\n"
+     " | [].exists_one(.x, x)\n"
+     " | ...............^"},
+    {"[].map(.x, x, x)", "",
+     "ERROR: <input>:1:9: map() variable name must be a simple identifier\n"
+     " | [].map(.x, x, x)\n"
+     " | ........^"},
+    {"[].filter(.x, x)", "",
+     "ERROR: <input>:1:12: filter() variable name must be a simple identifier\n"
+     " | [].filter(.x, x)\n"
+     " | ...........^"},
     {"x[\"a\"].single_int32 == 23",
      "_==_(\n"
      "  _[_](\n"
@@ -1518,6 +1539,29 @@ TEST_P(ExpressionTest, Parse) {
         << result->parsed_expr().ShortDebugString();
     ;
   }
+}
+
+TEST(ExpressionTest, CompositeExpressionOffsets) {
+  ParserOptions options;
+  std::vector<Macro> macros = Macro::AllMacros();
+
+  std::string list_expr = "[1, 2]";
+  auto list_result = EnrichedParse(list_expr, macros, "<input>", options);
+  ASSERT_THAT(list_result, IsOk());
+  auto list_offsets = list_result->enriched_source_info().offsets();
+  EXPECT_EQ(list_offsets.at(1), std::make_pair(0, 5));
+
+  std::string map_expr = "{'a': 1}";
+  auto map_result = EnrichedParse(map_expr, macros, "<input>", options);
+  ASSERT_THAT(map_result, IsOk());
+  auto map_offsets = map_result->enriched_source_info().offsets();
+  EXPECT_EQ(map_offsets.at(1), std::make_pair(0, 7));
+
+  std::string msg_expr = "Msg{f: 1}";
+  auto msg_result = EnrichedParse(msg_expr, macros, "<input>", options);
+  ASSERT_THAT(msg_result, IsOk());
+  auto msg_offsets = msg_result->enriched_source_info().offsets();
+  EXPECT_EQ(msg_offsets.at(1), std::make_pair(0, 8));
 }
 
 TEST(ExpressionTest, TsanOom) {

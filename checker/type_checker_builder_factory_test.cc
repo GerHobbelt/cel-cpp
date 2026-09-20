@@ -235,8 +235,8 @@ TEST(TypeCheckerBuilderTest, AddLibraryIncludeSubset) {
   ASSERT_THAT(
       builder->AddLibrarySubset(
           {"testlib",
-           [](absl::string_view /*function*/, absl::string_view overload_id) {
-             return (overload_id == "add_int" || overload_id == "sub_int");
+           [](absl::string_view /*function*/, const OverloadDecl& overload) {
+             return (overload.id() == "add_int" || overload.id() == "sub_int");
            }}),
       IsOk());
   ASSERT_OK_AND_ASSIGN(auto checker, builder->Build());
@@ -274,9 +274,8 @@ TEST(TypeCheckerBuilderTest, AddLibraryExcludeSubset) {
   ASSERT_THAT(
       builder->AddLibrarySubset(
           {"testlib",
-           [](absl::string_view /*function*/, absl::string_view overload_id) {
-             return (overload_id != "add_int" && overload_id != "sub_int");
-             ;
+           [](absl::string_view /*function*/, const OverloadDecl& overload) {
+             return (overload.id() != "add_int" && overload.id() != "sub_int");
            }}),
       IsOk());
   ASSERT_OK_AND_ASSIGN(auto checker, builder->Build());
@@ -313,7 +312,7 @@ TEST(TypeCheckerBuilderTest, AddLibrarySubsetRemoveAllOvl) {
   ASSERT_THAT(builder->AddLibrary(SubsetTestlib()), IsOk());
   ASSERT_THAT(builder->AddLibrarySubset({"testlib",
                                          [](absl::string_view function,
-                                            absl::string_view /*overload_id*/) {
+                                            const OverloadDecl& /*overload*/) {
                                            return function != "add";
                                          }}),
               IsOk());
@@ -352,12 +351,12 @@ TEST(TypeCheckerBuilderTest, AddLibraryOneSubsetPerLibraryId) {
   ASSERT_THAT(
       builder->AddLibrarySubset(
           {"testlib", [](absl::string_view function,
-                         absl::string_view /*overload_id*/) { return true; }}),
+                         const OverloadDecl& /*overload*/) { return true; }}),
       IsOk());
   EXPECT_THAT(
       builder->AddLibrarySubset(
           {"testlib", [](absl::string_view function,
-                         absl::string_view /*overload_id*/) { return true; }}),
+                         const OverloadDecl& /*overload*/) { return true; }}),
       StatusIs(absl::StatusCode::kAlreadyExists));
 }
 
@@ -369,7 +368,7 @@ TEST(TypeCheckerBuilderTest, AddLibrarySubsetLibraryIdRequireds) {
   ASSERT_THAT(builder->AddLibrary(SubsetTestlib()), IsOk());
   EXPECT_THAT(builder->AddLibrarySubset({"",
                                          [](absl::string_view function,
-                                            absl::string_view /*overload_id*/) {
+                                            const OverloadDecl& /*overload*/) {
                                            return function == "add";
                                          }}),
               StatusIs(absl::StatusCode::kInvalidArgument));
@@ -387,6 +386,27 @@ TEST(TypeCheckerBuilderTest, AddContextDeclaration) {
 
   ASSERT_THAT(builder->AddContextDeclaration(
                   "cel.expr.conformance.proto3.TestAllTypes"),
+              IsOk());
+  ASSERT_THAT(builder->AddFunction(fn_decl), IsOk());
+
+  ASSERT_OK_AND_ASSIGN(auto checker, builder->Build());
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("increment(single_int64)"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, checker->Check(std::move(ast)));
+  EXPECT_TRUE(result.IsValid());
+}
+
+TEST(TypeCheckerBuilderTest, AddContextDeclarationWithProtoTypeMask) {
+  ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<TypeCheckerBuilder> builder,
+      CreateTypeCheckerBuilder(GetSharedTestingDescriptorPool()));
+
+  ASSERT_OK_AND_ASSIGN(
+      auto fn_decl,
+      MakeFunctionDecl("increment", MakeOverloadDecl("increment_int", IntType(),
+                                                     IntType())));
+
+  ASSERT_THAT(builder->AddContextDeclarationWithProtoTypeMask(
+                  "cel.expr.conformance.proto3.TestAllTypes", {"single_int64"}),
               IsOk());
   ASSERT_THAT(builder->AddFunction(fn_decl), IsOk());
 
@@ -426,6 +446,32 @@ TEST(TypeCheckerBuilderTest, AllowWellKnownTypeContextDeclaration) {
                        type_checker->Check(std::move(ast)));
 
   ASSERT_TRUE(result.IsValid());
+}
+
+TEST(TypeCheckerBuilderTest,
+     AllowWellKnownTypeContextDeclarationWithProtoTypeMask) {
+  CheckerOptions options;
+  options.allow_well_known_type_context_declarations = true;
+  ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<TypeCheckerBuilder> builder,
+      CreateTypeCheckerBuilder(GetSharedTestingDescriptorPool(), options));
+
+  ASSERT_THAT(builder->AddContextDeclarationWithProtoTypeMask(
+                  "google.protobuf.Any", {"value"}),
+              IsOk());
+  ASSERT_THAT(builder->AddLibrary(StandardCheckerLibrary()), IsOk());
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<TypeChecker> type_checker,
+                       builder->Build());
+  // Visible field: value
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("value"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result,
+                       type_checker->Check(std::move(ast)));
+  ASSERT_TRUE(result.IsValid());
+  // Not visible field: type_url
+  ASSERT_OK_AND_ASSIGN(ast, MakeTestParsedAst("type_url"));
+  ASSERT_OK_AND_ASSIGN(result, type_checker->Check(std::move(ast)));
+  ASSERT_FALSE(result.IsValid());
 }
 
 TEST(TypeCheckerBuilderTest, AllowWellKnownTypeContextDeclarationStruct) {

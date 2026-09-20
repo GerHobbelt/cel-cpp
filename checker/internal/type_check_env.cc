@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "absl/base/nullability.h"
 #include "absl/status/statusor.h"
@@ -57,7 +58,7 @@ absl::StatusOr<std::optional<Type>> TypeCheckEnv::LookupTypeName(
       return type;
     }
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 absl::StatusOr<std::optional<VariableDecl>> TypeCheckEnv::LookupEnumConstant(
@@ -74,7 +75,7 @@ absl::StatusOr<std::optional<VariableDecl>> TypeCheckEnv::LookupEnumConstant(
       return decl;
     }
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 absl::StatusOr<std::optional<VariableDecl>> TypeCheckEnv::LookupTypeConstant(
@@ -91,11 +92,15 @@ absl::StatusOr<std::optional<VariableDecl>> TypeCheckEnv::LookupTypeConstant(
     return LookupEnumConstant(enum_name_candidate, value_name_candidate);
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 absl::StatusOr<std::optional<StructTypeField>> TypeCheckEnv::LookupStructField(
     absl::string_view type_name, absl::string_view field_name) const {
+  if (proto_type_mask_registry_ != nullptr &&
+      !proto_type_mask_registry_->FieldIsVisible(type_name, field_name)) {
+    return std::nullopt;
+  }
   // Check the type providers in registration order.
   // Note: this doesn't allow for shadowing a type with a subset type of the
   // same name -- the later type provider will still be considered when
@@ -108,7 +113,7 @@ absl::StatusOr<std::optional<StructTypeField>> TypeCheckEnv::LookupStructField(
       return field;
     }
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 const VariableDecl* absl_nullable VariableScope::LookupLocalVariable(
