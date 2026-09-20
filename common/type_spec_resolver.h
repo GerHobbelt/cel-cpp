@@ -18,6 +18,7 @@
 #include "absl/status/statusor.h"
 #include "common/ast.h"
 #include "common/type.h"
+#include "common/type_introspector.h"
 #include "google/protobuf/arena.h"
 #include "google/protobuf/descriptor.h"
 
@@ -28,9 +29,14 @@ namespace cel {
 // TypeSpec only specifies a type while Type provides support for inspecting
 // properties of the type when used in CEL. Returns a status with code
 // `InvalidArgument` if the input cannot be resolved to a type.
+absl::StatusOr<Type> ConvertTypeSpecToType(
+    const TypeSpec& type_spec, const cel::TypeIntrospector& type_introspector,
+    google::protobuf::Arena* arena);
+
+// Convenience overload for type resolution using only a descriptor pool.
 absl::StatusOr<Type> ConvertTypeSpecToType(const TypeSpec& type_spec,
-                                           google::protobuf::Arena* arena,
-                                           const google::protobuf::DescriptorPool& pool);
+                                           const google::protobuf::DescriptorPool& pool,
+                                           google::protobuf::Arena* arena);
 
 // Resolves a `cel::Type` to a `cel::TypeSpec`.
 absl::StatusOr<TypeSpec> ConvertTypeToTypeSpec(const Type& type);

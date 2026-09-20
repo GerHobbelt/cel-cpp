@@ -64,6 +64,7 @@ cc_library(
         "//runtime:constant_folding",
         "//runtime:optional_types",
         "//runtime:reference_resolver",
+        "//runtime:regex_precompilation",
         "//runtime:runtime_options",
         "//runtime:standard_runtime_builder_factory",
         "//testutil:test_macros",
@@ -168,10 +169,6 @@ _TESTS_TO_SKIP = [
     "timestamps/duration_converters/get_milliseconds",
 
     # Broken test cases which should be supported.
-    # TODO(issues/112): Unbound functions result in empty eval response.
-    "basic/functions/unbound",
-    "basic/functions/unbound_is_runtime_error",
-
     # TODO(issues/97): Parse-only qualified variable lookup "x.y" with binding "x.y" or "y" within container "x" fails
     "fields/qualified_identifier_resolution/qualified_ident,map_field_select,ident_with_longest_prefix_check,qualified_identifier_resolution_unchecked",
     "namespace/qualified/self_eval_qualified_lookup",
@@ -230,12 +227,6 @@ _TESTS_TO_SKIP_LEGACY = _TESTS_TO_SKIP + [
     "block_ext/basic/optional_message",
 ]
 
-_TESTS_TO_SKIP_CHECKED = [
-    # block is a post-check optimization that inserts internal variables. The C++ type checker
-    # needs support for a proper optimizer for this to work.
-    # "block_ext",
-]
-
 _TESTS_TO_SKIP_LEGACY_DASHBOARD = [
     # Future features for CEL 1.0
     # TODO(issues/119): Strong typing support for enums, specified but not implemented.
@@ -247,7 +238,7 @@ _TESTS_TO_SKIP_LEGACY_DASHBOARD = [
 ]
 
 # Generates a bunch of `cc_test` whose names follow the pattern
-# `conformance_(...)_{arena|refcount}_{optimized|unoptimized}_{recursive|iterative}`.
+# `conformance_(...)_{pratt|antlr}_{optimized|unoptimized}_{recursive|iterative}`.
 gen_conformance_tests(
     name = "conformance_parse_only",
     data = _ALL_TESTS,
@@ -267,7 +258,7 @@ gen_conformance_tests(
     checked = True,
     data = _ALL_TESTS,
     modern = True,
-    skip_tests = _TESTS_TO_SKIP_MODERN + _TESTS_TO_SKIP_CHECKED,
+    skip_tests = _TESTS_TO_SKIP_MODERN,
 )
 
 gen_conformance_tests(
@@ -275,7 +266,7 @@ gen_conformance_tests(
     checked = True,
     data = _ALL_TESTS,
     modern = False,
-    skip_tests = _TESTS_TO_SKIP_LEGACY + _TESTS_TO_SKIP_CHECKED,
+    skip_tests = _TESTS_TO_SKIP_LEGACY,
 )
 
 # select optimization is only supported for checked expressions.
@@ -285,7 +276,7 @@ gen_conformance_tests(
     data = _ALL_TESTS,
     modern = False,
     select_opt = True,
-    skip_tests = _TESTS_TO_SKIP_LEGACY + _TESTS_TO_SKIP_CHECKED,
+    skip_tests = _TESTS_TO_SKIP_LEGACY,
 )
 
 gen_conformance_tests(
@@ -294,7 +285,7 @@ gen_conformance_tests(
     data = _ALL_TESTS,
     modern = True,
     select_opt = True,
-    skip_tests = _TESTS_TO_SKIP_MODERN + _TESTS_TO_SKIP_CHECKED,
+    skip_tests = _TESTS_TO_SKIP_MODERN,
 )
 
 gen_conformance_tests(
@@ -303,7 +294,7 @@ gen_conformance_tests(
     data = _ALL_TESTS,
     enable_variadic_logical_operators = True,
     modern = True,
-    skip_tests = _TESTS_TO_SKIP_MODERN + _TESTS_TO_SKIP_CHECKED,
+    skip_tests = _TESTS_TO_SKIP_MODERN,
 )
 
 gen_conformance_tests(
@@ -312,11 +303,11 @@ gen_conformance_tests(
     data = _ALL_TESTS,
     enable_variadic_logical_operators = True,
     modern = False,
-    skip_tests = _TESTS_TO_SKIP_LEGACY + _TESTS_TO_SKIP_CHECKED,
+    skip_tests = _TESTS_TO_SKIP_LEGACY,
 )
 
 # Generates a bunch of `cc_test` whose names follow the pattern
-# `conformance_dashboard_..._{arena|refcount}_{optimized|unoptimized}_{recursive|iterative}`.
+# `conformance_dashboard_..._{pratt|antlr}_{optimized|unoptimized}_{recursive|iterative}`.
 gen_conformance_tests(
     name = "conformance_dashboard_parse_only",
     dashboard = True,

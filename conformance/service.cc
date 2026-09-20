@@ -76,6 +76,7 @@
 #include "runtime/constant_folding.h"
 #include "runtime/optional_types.h"
 #include "runtime/reference_resolver.h"
+#include "runtime/regex_precompilation.h"
 #include "runtime/runtime.h"
 #include "runtime/runtime_options.h"
 #include "runtime/standard_runtime_builder_factory.h"
@@ -129,7 +130,8 @@ cel::expr::Expr ExtractExpr(
 absl::Status LegacyParse(const conformance::v1alpha1::ParseRequest& request,
                          conformance::v1alpha1::ParseResponse& response,
                          bool enable_optional_syntax,
-                         bool enable_variadic_logical_operators) {
+                         bool enable_variadic_logical_operators,
+                         bool enable_pratt_parser) {
   if (request.cel_source().empty()) {
     return absl::InvalidArgumentError("no source code");
   }
@@ -137,6 +139,7 @@ absl::Status LegacyParse(const conformance::v1alpha1::ParseRequest& request,
   options.enable_optional_syntax = enable_optional_syntax;
   options.enable_quoted_identifiers = true;
   options.enable_variadic_logical_operators = enable_variadic_logical_operators;
+  options.enable_pratt_parser = enable_pratt_parser;
   cel::MacroRegistry macros;
   CEL_RETURN_IF_ERROR(cel::RegisterStandardMacros(macros, options));
   CEL_RETURN_IF_ERROR(
@@ -239,7 +242,7 @@ class LegacyConformanceServiceImpl : public ConformanceServiceInterface {
  public:
   static absl::StatusOr<std::unique_ptr<LegacyConformanceServiceImpl>> Create(
       bool optimize, bool recursive, bool select_optimization,
-      bool enable_variadic_logical_operators) {
+      bool enable_variadic_logical_operators, bool enable_pratt_parser) {
     static auto* constant_arena = new Arena();
 
     google::protobuf::LinkMessageReflection<
@@ -283,6 +286,7 @@ class LegacyConformanceServiceImpl : public ConformanceServiceInterface {
       std::cerr << "Enabling optimizations" << std::endl;
       options.constant_folding = true;
       options.constant_arena = constant_arena;
+      options.enable_typed_field_access = true;
     }
 
     if (select_optimization) {
@@ -317,14 +321,15 @@ class LegacyConformanceServiceImpl : public ConformanceServiceInterface {
         builder->GetRegistry(), options));
 
     return absl::WrapUnique(new LegacyConformanceServiceImpl(
-        std::move(builder), enable_variadic_logical_operators));
+        std::move(builder), enable_variadic_logical_operators,
+        enable_pratt_parser));
   }
 
   void Parse(const conformance::v1alpha1::ParseRequest& request,
              conformance::v1alpha1::ParseResponse& response) override {
     auto status =
         LegacyParse(request, response, /*enable_optional_syntax=*/false,
-                    enable_variadic_logical_operators_);
+                    enable_variadic_logical_operators_, enable_pratt_parser_);
     if (!status.ok()) {
       auto* issue = response.add_issues();
       issue->set_code(ToGrpcCode(status.code()));
@@ -423,19 +428,22 @@ class LegacyConformanceServiceImpl : public ConformanceServiceInterface {
 
  private:
   LegacyConformanceServiceImpl(std::unique_ptr<CelExpressionBuilder> builder,
-                               bool enable_variadic_logical_operators)
+                               bool enable_variadic_logical_operators,
+                               bool enable_pratt_parser)
       : builder_(std::move(builder)),
-        enable_variadic_logical_operators_(enable_variadic_logical_operators) {}
+        enable_variadic_logical_operators_(enable_variadic_logical_operators),
+        enable_pratt_parser_(enable_pratt_parser) {}
 
   std::unique_ptr<CelExpressionBuilder> builder_;
   bool enable_variadic_logical_operators_;
+  bool enable_pratt_parser_;
 };
 
 class ModernConformanceServiceImpl : public ConformanceServiceInterface {
  public:
   static absl::StatusOr<std::unique_ptr<ModernConformanceServiceImpl>> Create(
       bool optimize, bool recursive, bool select_optimization,
-      bool enable_variadic_logical_operators) {
+      bool enable_variadic_logical_operators, bool enable_pratt_parser) {
     google::protobuf::LinkMessageReflection<
         cel::expr::conformance::proto3::TestAllTypes>();
     google::protobuf::LinkMessageReflection<
@@ -477,15 +485,18 @@ class ModernConformanceServiceImpl : public ConformanceServiceInterface {
       options.max_recursion_depth = 48;
     }
 
-    return absl::WrapUnique(
-        new ModernConformanceServiceImpl(options, optimize, select_optimization,
-                                         enable_variadic_logical_operators));
+    return absl::WrapUnique(new ModernConformanceServiceImpl(
+        options, optimize, select_optimization,
+        enable_variadic_logical_operators, enable_pratt_parser));
   }
 
   absl::StatusOr<std::unique_ptr<const cel::Runtime>> Setup(
       absl::string_view container) {
     RuntimeOptions options(options_);
     options.container = std::string(container);
+    if (enable_optimizations_) {
+      options.enable_typed_field_access = true;
+    }
     CEL_ASSIGN_OR_RETURN(
         auto builder, CreateStandardRuntimeBuilder(
                           google::protobuf::DescriptorPool::generated_pool(), options));
@@ -493,6 +504,7 @@ class ModernConformanceServiceImpl : public ConformanceServiceInterface {
     if (enable_optimizations_) {
       CEL_RETURN_IF_ERROR(cel::extensions::EnableConstantFolding(
           builder, google::protobuf::MessageFactory::generated_factory()));
+      CEL_RETURN_IF_ERROR(cel::extensions::EnableRegexPrecompilation(builder));
     }
     CEL_RETURN_IF_ERROR(cel::EnableReferenceResolver(
         builder, cel::ReferenceResolverEnabled::kAlways));
@@ -532,7 +544,7 @@ class ModernConformanceServiceImpl : public ConformanceServiceInterface {
              conformance::v1alpha1::ParseResponse& response) override {
     auto status =
         LegacyParse(request, response, /*enable_optional_syntax=*/true,
-                    enable_variadic_logical_operators_);
+                    enable_variadic_logical_operators_, enable_pratt_parser_);
     if (!status.ok()) {
       auto* issue = response.add_issues();
       issue->set_code(ToGrpcCode(status.code()));
@@ -624,11 +636,13 @@ class ModernConformanceServiceImpl : public ConformanceServiceInterface {
   ModernConformanceServiceImpl(const RuntimeOptions& options,
                                bool enable_optimizations,
                                bool enable_select_optimization,
-                               bool enable_variadic_logical_operators)
+                               bool enable_variadic_logical_operators,
+                               bool enable_pratt_parser)
       : options_(options),
         enable_optimizations_(enable_optimizations),
         enable_select_optimization_(enable_select_optimization),
-        enable_variadic_logical_operators_(enable_variadic_logical_operators) {}
+        enable_variadic_logical_operators_(enable_variadic_logical_operators),
+        enable_pratt_parser_(enable_pratt_parser) {}
 
   static absl::StatusOr<std::unique_ptr<cel::TraceableProgram>> Plan(
       const cel::Runtime& runtime,
@@ -660,6 +674,7 @@ class ModernConformanceServiceImpl : public ConformanceServiceInterface {
   bool enable_optimizations_;
   bool enable_select_optimization_;
   bool enable_variadic_logical_operators_;
+  bool enable_pratt_parser_;
 };
 
 }  // namespace
@@ -673,11 +688,11 @@ NewConformanceService(const ConformanceServiceOptions& options) {
   if (options.modern) {
     return google::api::expr::runtime::ModernConformanceServiceImpl::Create(
         options.optimize, options.recursive, options.select_optimization,
-        options.enable_variadic_logical_operators);
+        options.enable_variadic_logical_operators, options.enable_pratt_parser);
   } else {
     return google::api::expr::runtime::LegacyConformanceServiceImpl::Create(
         options.optimize, options.recursive, options.select_optimization,
-        options.enable_variadic_logical_operators);
+        options.enable_variadic_logical_operators, options.enable_pratt_parser);
   }
 }
 
