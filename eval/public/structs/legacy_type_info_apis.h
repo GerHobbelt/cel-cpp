@@ -15,19 +15,26 @@
 #ifndef THIRD_PARTY_CEL_CPP_EVAL_PUBLIC_STRUCTS_LEGACY_TYPE_INFO_APIS_H_
 #define THIRD_PARTY_CEL_CPP_EVAL_PUBLIC_STRUCTS_LEGACY_TYPE_INFO_APIS_H_
 
+#include <optional>
 #include <string>
 
 #include "absl/base/nullability.h"
-#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "eval/public/message_wrapper.h"
 #include "google/protobuf/descriptor.h"
+
+namespace cel::interop_internal {
+struct TrivialTypeInfo;
+}  // namespace cel::interop_internal
 
 namespace google::api::expr::runtime {
 
 // Forward declared to resolve cyclic dependency.
 class LegacyTypeAccessApis;
-class LegacyTypeMutationApis;
+
+// Forward declare permitted subclasses.
+class DucktypedMessageAdapter;
+class ProtoMessageTypeAdapter;
 
 // Interface for providing type info from a user defined type (represented as a
 // message).
@@ -35,8 +42,8 @@ class LegacyTypeMutationApis;
 // Provides ability to obtain field access apis, type info, and debug
 // representation of a message.
 //
-// The message parameter may wrap a nullptr to request generic accessors /
-// mutators for the TypeInfo instance if it is available.
+// The message parameter may wrap a nullptr to request generic accessors for
+// the TypeInfo instance if it is available.
 //
 // This is implemented as a separate class from LegacyTypeAccessApis to resolve
 // cyclic dependency between CelValue (which needs to access these apis to
@@ -82,25 +89,23 @@ class LegacyTypeInfoApis {
   virtual const LegacyTypeAccessApis* GetAccessApis(
       const MessageWrapper& wrapped_message) const = 0;
 
-  // Return a pointer to the wrapped message's mutation api implementation.
-  //
-  // The CEL interpreter assumes that the returned pointer is owned externally
-  // and will outlive any CelValues created by the interpreter.
-  //
-  // Nullptr signals that the value does not provide mutation apis.
-  virtual const LegacyTypeMutationApis* GetMutationApis(
-      const MessageWrapper& wrapped_message [[maybe_unused]]) const {
-    return nullptr;
-  }
-
   // Return a description of the underlying field if defined.
   //
   // The underlying string is expected to remain valid as long as the
   // LegacyTypeInfoApis instance.
-  virtual absl::optional<FieldDescription> FindFieldByName(
+  virtual std::optional<FieldDescription> FindFieldByName(
       absl::string_view name [[maybe_unused]]) const {
-    return absl::nullopt;
+    return std::nullopt;
   }
+
+ private:
+  // This class should only be implemented by CEL. Custom structs are only
+  // supported using the cel::Value APIs.
+  friend class DucktypedMessageAdapter;
+  friend class ProtoMessageTypeAdapter;
+  friend class cel::interop_internal::TrivialTypeInfo;
+
+  LegacyTypeInfoApis() = default;
 };
 
 }  // namespace google::api::expr::runtime

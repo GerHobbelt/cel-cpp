@@ -15,7 +15,7 @@
 #include "eval/public/structs/proto_message_type_adapter.h"
 
 #include <cstdint>
-#include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,8 +26,6 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "absl/strings/substitute.h"
-#include "absl/types/optional.h"
 #include "absl/types/span.h"
 #include "base/attribute.h"
 #include "common/memory.h"
@@ -36,13 +34,11 @@
 #include "eval/public/containers/internal_field_backed_list_impl.h"
 #include "eval/public/containers/internal_field_backed_map_impl.h"
 #include "eval/public/message_wrapper.h"
-#include "eval/public/structs/cel_proto_wrap_util.h"
 #include "eval/public/structs/field_access_impl.h"
 #include "eval/public/structs/legacy_type_adapter.h"
 #include "eval/public/structs/legacy_type_info_apis.h"
 #include "extensions/protobuf/internal/qualify.h"
 #include "extensions/protobuf/memory_manager.h"
-#include "internal/casts.h"
 #include "internal/status_macros.h"
 #include "google/protobuf/arena.h"
 #include "google/protobuf/descriptor.h"
@@ -178,7 +174,7 @@ class LegacyQualifyState final
   LegacyQualifyState(const LegacyQualifyState&) = delete;
   LegacyQualifyState& operator=(const LegacyQualifyState&) = delete;
 
-  absl::optional<CelValue>& result() { return result_; }
+  std::optional<CelValue>& result() { return result_; }
 
  private:
   void SetResultFromError(absl::Status status,
@@ -221,7 +217,7 @@ class LegacyQualifyState final
     return absl::OkStatus();
   }
 
-  absl::optional<CelValue> result_;
+  std::optional<CelValue> result_;
 };
 
 absl::StatusOr<LegacyQualifyResult> QualifyImpl(
@@ -279,8 +275,9 @@ std::vector<absl::string_view> ListFieldsImpl(
   return field_names;
 }
 
+}  // namespace
+
 class DucktypedMessageAdapter : public LegacyTypeAccessApis,
-                                public LegacyTypeMutationApis,
                                 public LegacyTypeInfoApis {
  public:
   // Implement field access APIs.
@@ -351,46 +348,6 @@ class DucktypedMessageAdapter : public LegacyTypeAccessApis,
     return message->ShortDebugString();
   }
 
-  bool DefinesField(absl::string_view field_name) const override {
-    // Pretend all our fields exist. Real errors will be returned from field
-    // getters and setters.
-    return true;
-  }
-
-  absl::StatusOr<CelValue::MessageWrapper::Builder> NewInstance(
-      cel::MemoryManagerRef memory_manager) const override {
-    return absl::UnimplementedError("NewInstance is not implemented");
-  }
-
-  absl::StatusOr<CelValue> AdaptFromWellKnownType(
-      cel::MemoryManagerRef memory_manager,
-      CelValue::MessageWrapper::Builder instance) const override {
-    if (!instance.HasFullProto() || instance.message_ptr() == nullptr) {
-      return absl::UnimplementedError(
-          "MessageLite is not supported, descriptor is required");
-    }
-    return ProtoMessageTypeAdapter(
-               static_cast<const google::protobuf::Message*>(instance.message_ptr())
-                   ->GetDescriptor(),
-               nullptr)
-        .AdaptFromWellKnownType(memory_manager, instance);
-  }
-
-  absl::Status SetField(
-      absl::string_view field_name, const CelValue& value,
-      cel::MemoryManagerRef memory_manager,
-      CelValue::MessageWrapper::Builder& instance) const override {
-    if (!instance.HasFullProto() || instance.message_ptr() == nullptr) {
-      return absl::UnimplementedError(
-          "MessageLite is not supported, descriptor is required");
-    }
-    return ProtoMessageTypeAdapter(
-               static_cast<const google::protobuf::Message*>(instance.message_ptr())
-                   ->GetDescriptor(),
-               nullptr)
-        .SetField(field_name, value, memory_manager, instance);
-  }
-
   std::vector<absl::string_view> ListFields(
       const CelValue::MessageWrapper& instance) const override {
     return ListFieldsImpl(instance);
@@ -401,16 +358,17 @@ class DucktypedMessageAdapter : public LegacyTypeAccessApis,
     return this;
   }
 
-  const LegacyTypeMutationApis* GetMutationApis(
-      const MessageWrapper& wrapped_message) const override {
-    return this;
-  }
-
   static const DucktypedMessageAdapter& GetSingleton() {
     static absl::NoDestructor<DucktypedMessageAdapter> instance;
     return *instance;
   }
+
+ private:
+  friend class absl::NoDestructor<DucktypedMessageAdapter>;
+  DucktypedMessageAdapter() = default;
 };
+
+namespace {
 
 CelValue MessageCelValueFactory(const google::protobuf::Message* message) {
   return CelValue::CreateMessageWrapper(
@@ -457,19 +415,13 @@ absl::string_view ProtoMessageTypeAdapter::GetTypename(
   return descriptor_->full_name();
 }
 
-const LegacyTypeMutationApis* ProtoMessageTypeAdapter::GetMutationApis(
-    const MessageWrapper& wrapped_message) const {
-  // Defer checks for misuse on wrong message kind in the accessor calls.
-  return this;
-}
-
 const LegacyTypeAccessApis* ProtoMessageTypeAdapter::GetAccessApis(
     const MessageWrapper& wrapped_message) const {
   // Defer checks for misuse on wrong message kind in the builder calls.
   return this;
 }
 
-absl::optional<LegacyTypeInfoApis::FieldDescription>
+std::optional<LegacyTypeInfoApis::FieldDescription>
 ProtoMessageTypeAdapter::FindFieldByName(absl::string_view field_name) const {
   if (descriptor_ == nullptr) {
     return std::nullopt;
@@ -484,41 +436,6 @@ ProtoMessageTypeAdapter::FindFieldByName(absl::string_view field_name) const {
 
   return LegacyTypeInfoApis::FieldDescription{field_descriptor->number(),
                                               field_descriptor->name()};
-}
-
-absl::Status ProtoMessageTypeAdapter::ValidateSetFieldOp(
-    bool assertion, absl::string_view field, absl::string_view detail) const {
-  if (!assertion) {
-    return absl::InvalidArgumentError(
-        absl::Substitute("SetField failed on message $0, field '$1': $2",
-                         descriptor_->full_name(), field, detail));
-  }
-  return absl::OkStatus();
-}
-
-absl::StatusOr<CelValue::MessageWrapper::Builder>
-ProtoMessageTypeAdapter::NewInstance(
-    cel::MemoryManagerRef memory_manager) const {
-  if (message_factory_ == nullptr) {
-    return absl::UnimplementedError(
-        absl::StrCat("Cannot create message ", descriptor_->name()));
-  }
-
-  // This implementation requires arena-backed memory manager.
-  google::protobuf::Arena* arena = ProtoMemoryManagerArena(memory_manager);
-  const Message* prototype = message_factory_->GetPrototype(descriptor_);
-
-  Message* msg = (prototype != nullptr) ? prototype->New(arena) : nullptr;
-
-  if (msg == nullptr) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("Failed to create message ", descriptor_->name()));
-  }
-  return MessageWrapper::Builder(msg);
-}
-
-bool ProtoMessageTypeAdapter::DefinesField(absl::string_view field_name) const {
-  return descriptor_->FindFieldByName(field_name) != nullptr;
 }
 
 absl::StatusOr<bool> ProtoMessageTypeAdapter::HasField(
@@ -551,136 +468,6 @@ ProtoMessageTypeAdapter::Qualify(
                      memory_manager);
 }
 
-absl::Status ProtoMessageTypeAdapter::SetField(
-    const google::protobuf::FieldDescriptor* field, const CelValue& value,
-    google::protobuf::Arena* arena, google::protobuf::Message* message) const {
-  if (field->is_map()) {
-    constexpr int kKeyField = 1;
-    constexpr int kValueField = 2;
-
-    const CelMap* cel_map;
-    CEL_RETURN_IF_ERROR(ValidateSetFieldOp(
-        value.GetValue<const CelMap*>(&cel_map) && cel_map != nullptr,
-        field->name(),
-        absl::StrCat("value is not CelMap - value is ",
-                     CelValue::TypeName(value.type()))));
-
-    auto entry_descriptor = field->message_type();
-
-    CEL_RETURN_IF_ERROR(
-        ValidateSetFieldOp(entry_descriptor != nullptr, field->name(),
-                           "failed to find map entry descriptor"));
-    auto key_field_descriptor = entry_descriptor->FindFieldByNumber(kKeyField);
-    auto value_field_descriptor =
-        entry_descriptor->FindFieldByNumber(kValueField);
-
-    CEL_RETURN_IF_ERROR(
-        ValidateSetFieldOp(key_field_descriptor != nullptr, field->name(),
-                           "failed to find key field descriptor"));
-
-    CEL_RETURN_IF_ERROR(
-        ValidateSetFieldOp(value_field_descriptor != nullptr, field->name(),
-                           "failed to find value field descriptor"));
-
-    bool prune_when_null = false;
-    if (value_field_descriptor->cpp_type() ==
-        google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
-      auto well_known_type =
-          value_field_descriptor->message_type()->well_known_type();
-      if (well_known_type != google::protobuf::Descriptor::WELLKNOWNTYPE_ANY &&
-          well_known_type != google::protobuf::Descriptor::WELLKNOWNTYPE_VALUE &&
-          well_known_type != google::protobuf::Descriptor::WELLKNOWNTYPE_LISTVALUE &&
-          well_known_type != google::protobuf::Descriptor::WELLKNOWNTYPE_STRUCT) {
-        prune_when_null = true;
-      }
-    }
-
-    CEL_ASSIGN_OR_RETURN(const CelList* key_list, cel_map->ListKeys(arena));
-    for (int i = 0; i < key_list->size(); i++) {
-      CelValue key = (*key_list).Get(arena, i);
-
-      auto value = (*cel_map).Get(arena, key);
-      CEL_RETURN_IF_ERROR(ValidateSetFieldOp(value.has_value(), field->name(),
-                                             "error serializing CelMap"));
-      if (prune_when_null && value->IsNull()) {
-        continue;
-      }
-      Message* entry_msg = message->GetReflection()->AddMessage(message, field);
-      CEL_RETURN_IF_ERROR(internal::SetValueToSingleField(
-          key, key_field_descriptor, entry_msg, arena));
-      CEL_RETURN_IF_ERROR(internal::SetValueToSingleField(
-          value.value(), value_field_descriptor, entry_msg, arena));
-    }
-
-  } else if (field->is_repeated()) {
-    const CelList* cel_list;
-    CEL_RETURN_IF_ERROR(ValidateSetFieldOp(
-        value.GetValue<const CelList*>(&cel_list) && cel_list != nullptr,
-        field->name(),
-        absl::StrCat("expected CelList value - value is",
-                     CelValue::TypeName(value.type()))));
-
-    for (int i = 0; i < cel_list->size(); i++) {
-      CEL_RETURN_IF_ERROR(internal::AddValueToRepeatedField(
-          (*cel_list).Get(arena, i), field, message, arena));
-    }
-  } else {
-    CEL_RETURN_IF_ERROR(
-        internal::SetValueToSingleField(value, field, message, arena));
-  }
-  return absl::OkStatus();
-}
-
-absl::Status ProtoMessageTypeAdapter::SetField(
-    absl::string_view field_name, const CelValue& value,
-    cel::MemoryManagerRef memory_manager,
-    CelValue::MessageWrapper::Builder& instance) const {
-  // Assume proto arena implementation if this provider is used.
-  google::protobuf::Arena* arena =
-      cel::extensions::ProtoMemoryManagerArena(memory_manager);
-
-  CEL_ASSIGN_OR_RETURN(google::protobuf::Message * mutable_message,
-                       UnwrapMessage(instance, "SetField"));
-
-  const google::protobuf::FieldDescriptor* field_descriptor =
-      descriptor_->FindFieldByName(field_name);
-  CEL_RETURN_IF_ERROR(
-      ValidateSetFieldOp(field_descriptor != nullptr, field_name, "not found"));
-
-  return SetField(field_descriptor, value, arena, mutable_message);
-}
-
-absl::Status ProtoMessageTypeAdapter::SetFieldByNumber(
-    int64_t field_number, const CelValue& value,
-    cel::MemoryManagerRef memory_manager,
-    CelValue::MessageWrapper::Builder& instance) const {
-  // Assume proto arena implementation if this provider is used.
-  google::protobuf::Arena* arena =
-      cel::extensions::ProtoMemoryManagerArena(memory_manager);
-
-  CEL_ASSIGN_OR_RETURN(google::protobuf::Message * mutable_message,
-                       UnwrapMessage(instance, "SetField"));
-
-  const google::protobuf::FieldDescriptor* field_descriptor =
-      descriptor_->FindFieldByNumber(field_number);
-  CEL_RETURN_IF_ERROR(ValidateSetFieldOp(
-      field_descriptor != nullptr, absl::StrCat(field_number), "not found"));
-
-  return SetField(field_descriptor, value, arena, mutable_message);
-}
-
-absl::StatusOr<CelValue> ProtoMessageTypeAdapter::AdaptFromWellKnownType(
-    cel::MemoryManagerRef memory_manager,
-    CelValue::MessageWrapper::Builder instance) const {
-  // Assume proto arena implementation if this provider is used.
-  google::protobuf::Arena* arena =
-      cel::extensions::ProtoMemoryManagerArena(memory_manager);
-  CEL_ASSIGN_OR_RETURN(google::protobuf::Message * message,
-                       UnwrapMessage(instance, "AdaptFromWellKnownType"));
-  return internal::UnwrapMessageToValue(message, &MessageCelValueFactory,
-                                        arena);
-}
-
 bool ProtoMessageTypeAdapter::IsEqualTo(
     const CelValue::MessageWrapper& instance,
     const CelValue::MessageWrapper& other_instance) const {
@@ -704,5 +491,11 @@ std::vector<absl::string_view> ProtoMessageTypeAdapter::ListFields(
 const LegacyTypeInfoApis& GetGenericProtoTypeInfoInstance() {
   return DucktypedMessageAdapter::GetSingleton();
 }
+
+namespace internal {
+const LegacyTypeAccessApis& GetGenericProtoAccessApisInstance() {
+  return DucktypedMessageAdapter::GetSingleton();
+}
+}  // namespace internal
 
 }  // namespace google::api::expr::runtime

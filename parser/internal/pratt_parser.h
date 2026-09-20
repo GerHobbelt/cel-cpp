@@ -25,12 +25,17 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "common/ast.h"
 #include "common/source.h"
 #include "parser/macro.h"
 #include "parser/macro_registry.h"
 #include "parser/options.h"
 #include "parser/parser_interface.h"
+
+namespace cel {
+class EnrichedSourceInfo;
+}  // namespace cel
 
 namespace cel::parser_internal {
 
@@ -59,6 +64,9 @@ class PrattParserImpl final : public cel::Parser {
       const cel::Source& source,
       std::vector<cel::ParseIssue>* absl_nullable parse_issues) const override;
 
+  absl::StatusOr<std::unique_ptr<cel::Source>> PrepareSourceImpl(
+      absl::string_view input, absl::string_view description) const override;
+
   std::unique_ptr<cel::ParserBuilder> ToBuilder() const override;
 
  private:
@@ -70,7 +78,8 @@ class PrattParserImpl final : public cel::Parser {
 absl::StatusOr<std::unique_ptr<cel::Ast>> PrattParseImpl(
     const cel::Source& source, const cel::MacroRegistry& registry,
     const ParserOptions& options,
-    std::vector<cel::ParseIssue>* parse_issues = nullptr);
+    std::vector<cel::ParseIssue>* parse_issues = nullptr,
+    cel::EnrichedSourceInfo* enriched_source_info = nullptr);
 
 class PrattParserBuilderImpl final : public cel::ParserBuilder {
  public:

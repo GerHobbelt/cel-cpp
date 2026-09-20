@@ -69,7 +69,7 @@ absl::Status ParsedMapFieldValue::SerializeTo(
   google::protobuf::Value message;
   CEL_RETURN_IF_ERROR(internal::MessageFieldToJson(
       *message_, field_, descriptor_pool, message_factory, &message));
-  if (!message.list_value().SerializePartialToZeroCopyStream(output)) {
+  if (!message.struct_value().SerializePartialToZeroCopyStream(output)) {
     return absl::UnknownError("failed to serialize google.protobuf.Struct");
   }
   return absl::OkStatus();
@@ -157,9 +157,8 @@ bool ParsedMapFieldValue::IsZeroValue() const { return IsEmpty(); }
 ParsedMapFieldValue ParsedMapFieldValue::Clone(
     google::protobuf::Arena* absl_nonnull arena) const {
   ABSL_DCHECK(arena != nullptr);
-  ABSL_DCHECK(*this);
 
-  if (ABSL_PREDICT_FALSE(field_ == nullptr)) {
+  if (ABSL_PREDICT_FALSE(!*this)) {
     return ParsedMapFieldValue();
   }
   if (arena_ == arena) {

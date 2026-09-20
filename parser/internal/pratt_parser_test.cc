@@ -180,6 +180,32 @@ MATCHER_P(AstIs, expected_ast, "") {
   return false;
 }
 
+MATCHER_P(AstEq, expected_expr, "") {
+  KindAndIdAdorner kind_and_id_adorner;
+  cel::ExprPrinter printer(kind_and_id_adorner);
+  ParserOptions options;
+  auto actual_ast = Parse(arg, options);
+  if (!actual_ast.ok()) {
+    *result_listener << "\n  Actual expression failed to parse: "
+                     << actual_ast.status();
+    return false;
+  }
+  std::string actual = Unindent(printer.Print((*actual_ast)->root_expr()));
+  auto expected_ast = Parse(expected_expr, options);
+  if (!expected_ast.ok()) {
+    *result_listener << "\n  Expected expression failed to parse: "
+                     << expected_ast.status();
+    return false;
+  }
+  std::string expected = Unindent(printer.Print((*expected_ast)->root_expr()));
+  if (actual == expected) {
+    return true;
+  }
+  *result_listener << "\n  Actual:   " << actual
+                   << "\n  Expected: " << expected;
+  return false;
+}
+
 TEST_P(PrattParserTest, Parse) {
   const TestCase& test_case = GetParam();
   cel::ParserOptions options;
@@ -408,9 +434,7 @@ std::vector<TestCase> GetParserTestCases() {
       TestCase{
           .source = "- -1",
           .expected_ast = R"(
-              -_(
-                -1^#2:int64#
-              )^#1:Expr.Call#
+              1^#3:int64#
             )",
       },
       TestCase{
@@ -428,11 +452,7 @@ std::vector<TestCase> GetParserTestCases() {
           .source = "---a",
           .expected_ast = R"(
               -_(
-                -_(
-                  -_(
-                    a^#4:Expr.Ident#
-                  )^#3:Expr.Call#
-                )^#2:Expr.Call#
+                a^#4:Expr.Ident#
               )^#1:Expr.Call#
             )",
       },
@@ -1470,6 +1490,44 @@ TEST(PrattParserRecursionDepthTest, ParseRecursionDepth) {
   EXPECT_THAT(Parse("((((1))))", options), IsOkAndHolds(NotNull()));
   EXPECT_THAT(Parse("[[[[[[1]]]]]]", options),
               StatusIs(absl::StatusCode::kCancelled));
+}
+
+TEST(PrattParserRecursionDepthTest, ParseRecursionDepthIgnoreExtraParens) {
+  cel::ParserOptions options;
+  options.max_recursion_depth = 1;
+  EXPECT_THAT(Parse("((((1))))", options), IsOkAndHolds(NotNull()));
+}
+
+TEST(PrattParserRecursionDepthTest, DeeplyNestedParens) {
+  cel::ParserOptions options;
+  options.max_recursion_depth = 1;
+  std::string literal_expr =
+      std::string(1000, '(') + "42" + std::string(1000, ')');
+  EXPECT_THAT(Parse(literal_expr, options), IsOkAndHolds(NotNull()));
+
+  std::string binary_expr =
+      std::string(1000, '(') + "1 + 2" + std::string(1000, ')');
+  EXPECT_THAT(Parse(binary_expr, options), IsOkAndHolds(NotNull()));
+}
+
+TEST(PrattParserRecursionDepthTest, NestedAndGroupingParensCombinations) {
+  EXPECT_THAT("(( (1) + 2 ))", AstEq("1 + 2"));
+  EXPECT_THAT("((1 + 2) * (3 + 4))", AstEq("(1 + 2) * (3 + 4)"));
+  EXPECT_THAT("((((1)) + ((2))))", AstEq("1 + 2"));
+  EXPECT_THAT("(((1 + 2) * 3) + 4)", AstEq("(1 + 2) * 3 + 4"));
+  EXPECT_THAT("f((((1))), (((2))))", AstEq("f(1, 2)"));
+  EXPECT_THAT("[{((1)): ((2))}]", AstEq("[{1: 2}]"));
+  EXPECT_THAT("(((a))).b[0]", AstEq("a.b[0]"));
+}
+
+TEST(PrattParserRecursionDepthTest, MismatchedParensStillReportErrors) {
+  cel::ParserOptions options;
+  EXPECT_THAT(Parse("((((1))", options),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+  EXPECT_THAT(Parse("(((1 + 2]", options),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+  EXPECT_THAT(Parse("(( [ 1 ) ] ))", options),
+              StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
 TEST(PrattParserRecursionDepthTest, SequentialScopesDoNotAccumulateDepth) {

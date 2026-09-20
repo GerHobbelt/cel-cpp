@@ -58,15 +58,16 @@ bazel_dep(
     repo_name = "com_googlesource_code_re2",
 )
 bazel_dep(
-    name = "flatbuffers",
-    version = "25.9.23",
-    repo_name = "com_github_google_flatbuffers",
-)
-bazel_dep(
     name = "cel-spec",
-    version = "0.25.1",
+    version = "0.25.2",
     repo_name = "com_google_cel_spec",
 )
+git_override(
+    module_name = "cel-spec",
+    commit = "ba58ae5007845f3a1279b488cdeb79645ce958bb",
+    remote = "https://github.com/cel-expr/cel-spec",
+)
+
 bazel_dep(
     name = "platforms",
     version = "1.1.0",

@@ -13,6 +13,7 @@
 #include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #include "base/attribute.h"
 #include "base/attribute_set.h"
 #include "base/type_provider.h"
@@ -24,9 +25,7 @@
 #include "common/value_testing.h"
 #include "eval/eval/attribute_trail.h"
 #include "eval/eval/cel_expression_flat_impl.h"
-#include "eval/eval/compiler_constant_step.h"
 #include "eval/eval/const_value_step.h"
-#include "eval/eval/create_map_step.h"
 #include "eval/eval/evaluator_core.h"
 #include "eval/eval/ident_step.h"
 #include "eval/public/activation.h"
@@ -34,9 +33,7 @@
 #include "eval/public/cel_value.h"
 #include "eval/public/containers/container_backed_map_impl.h"
 #include "eval/public/structs/cel_proto_wrapper.h"
-#include "eval/public/structs/legacy_type_adapter.h"
 #include "eval/public/structs/trivial_legacy_type_info.h"
-#include "eval/public/testing/matchers.h"
 #include "eval/public/unknown_attribute_set.h"
 #include "eval/public/unknown_set.h"
 #include "eval/testutil/test_extensions.pb.h"
@@ -81,41 +78,13 @@ using ::cel::internal::test::EqualsProto;
 using ::cel::runtime_internal::NewTestingRuntimeEnv;
 using ::cel::runtime_internal::RuntimeEnv;
 using ::cel::test::IntValueIs;
-using ::testing::_;
 using ::testing::Eq;
 using ::testing::HasSubstr;
-using ::testing::Return;
 using ::testing::UnorderedElementsAre;
 
 struct RunExpressionOptions {
   bool enable_unknowns = false;
   bool enable_wrapper_type_null_unboxing = false;
-};
-
-// Simple implementation LegacyTypeAccessApis / LegacyTypeInfoApis that allows
-// mocking for getters/setters.
-class MockAccessor : public LegacyTypeAccessApis, public LegacyTypeInfoApis {
- public:
-  MOCK_METHOD(absl::StatusOr<bool>, HasField,
-              (absl::string_view field_name,
-               const CelValue::MessageWrapper& value),
-              (const, override));
-  MOCK_METHOD(absl::StatusOr<CelValue>, GetField,
-              (absl::string_view field_name,
-               const CelValue::MessageWrapper& instance,
-               ProtoWrapperTypeOptions unboxing_option,
-               cel::MemoryManagerRef memory_manager),
-              (const, override));
-  MOCK_METHOD(absl::string_view, GetTypename,
-              (const CelValue::MessageWrapper& instance), (const, override));
-  MOCK_METHOD(std::string, DebugString,
-              (const CelValue::MessageWrapper& instance), (const, override));
-  MOCK_METHOD(std::vector<absl::string_view>, ListFields,
-              (const CelValue::MessageWrapper& value), (const, override));
-  const LegacyTypeAccessApis* GetAccessApis(
-      const CelValue::MessageWrapper& instance) const override {
-    return this;
-  }
 };
 
 class SelectStepTest : public testing::Test {
@@ -124,7 +93,6 @@ class SelectStepTest : public testing::Test {
   // Helper method. Creates simple pipeline containing Select step and runs it.
   absl::StatusOr<CelValue> RunExpression(const CelValue target,
                                          absl::string_view field, bool test,
-                                         absl::string_view unknown_path,
                                          RunExpressionOptions options) {
     ExecutionPath path;
 
@@ -150,6 +118,8 @@ class SelectStepTest : public testing::Test {
       runtime_options.unknown_processing =
           cel::UnknownProcessingOptions::kAttributeOnly;
     }
+    // Force the creation of a message factory at the env level.
+    static_cast<void>(env_->MutableMessageFactory());
     CelExpressionFlatImpl cel_expr(
         env_, FlatExpression(std::move(path), /*comprehension_slot_count=*/0,
                              env_->type_registry.GetComposedTypeProvider(),
@@ -164,35 +134,20 @@ class SelectStepTest : public testing::Test {
                                          absl::string_view field, bool test,
                                          RunExpressionOptions options) {
     return RunExpression(CelProtoWrapper::CreateMessage(message, &arena_),
-                         field, test, "", options);
+                         field, test, options);
   }
 
   absl::StatusOr<CelValue> RunExpression(const TestMessage* message,
                                          absl::string_view field, bool test,
-                                         absl::string_view unknown_path,
                                          RunExpressionOptions options) {
     return RunExpression(CelProtoWrapper::CreateMessage(message, &arena_),
-                         field, test, unknown_path, options);
-  }
-
-  absl::StatusOr<CelValue> RunExpression(const TestMessage* message,
-                                         absl::string_view field, bool test,
-                                         RunExpressionOptions options) {
-    return RunExpression(message, field, test, "", options);
-  }
-
-  absl::StatusOr<CelValue> RunExpression(const CelMap* map_value,
-                                         absl::string_view field, bool test,
-                                         absl::string_view unknown_path,
-                                         RunExpressionOptions options) {
-    return RunExpression(CelValue::CreateMap(map_value), field, test,
-                         unknown_path, options);
+                         field, test, options);
   }
 
   absl::StatusOr<CelValue> RunExpression(const CelMap* map_value,
                                          absl::string_view field, bool test,
                                          RunExpressionOptions options) {
-    return RunExpression(map_value, field, test, "", options);
+    return RunExpression(CelValue::CreateMap(map_value), field, test, options);
   }
 
  protected:
@@ -221,8 +176,7 @@ TEST_P(SelectStepConformanceTest, SelectTargetNotStructOrMap) {
   ASSERT_OK_AND_ASSIGN(
       CelValue result,
       RunExpression(CelValue::CreateStringView("some_value"), "some_field",
-                    /*test=*/false,
-                    /*unknown_path=*/"", options));
+                    /*test=*/false, options));
 
   ASSERT_TRUE(result.IsError());
   EXPECT_THAT(*result.ErrorOrDie(),
@@ -358,7 +312,7 @@ TEST_F(SelectStepTest, MapPresenseIsErrorTest) {
                          CelProtoWrapper::CreateMessage(&message, &arena_));
 
   ASSERT_OK_AND_ASSIGN(CelValue result, cel_expr.Evaluate(activation, &arena_));
-  EXPECT_TRUE(result.IsError());
+  ASSERT_TRUE(result.IsError());
   EXPECT_EQ(result.ErrorOrDie()->code(), absl::StatusCode::kInvalidArgument);
 }
 
@@ -579,17 +533,36 @@ TEST_P(SelectStepConformanceTest, GlobalExtensionsMessageTest) {
 }
 
 TEST_P(SelectStepConformanceTest, GlobalExtensionsMessageUnsetTest) {
-  TestExtensions exts;
+  // Implementation details:
+  // The test environment is a dynamic descriptor pool with the same definition
+  // as the linked proto.
+  // Use a dynamic message with the expected factory and pool so we can expect
+  // the identity of the default message.
+  const google::protobuf::Descriptor* descriptor =
+      env_->descriptor_pool->FindMessageTypeByName(
+          TestExtensions::descriptor()->full_name());
+  ASSERT_NE(descriptor, nullptr);
+  const google::protobuf::FieldDescriptor* field =
+      env_->descriptor_pool->FindExtensionByPrintableName(
+          descriptor, "google.api.expr.runtime.nested_ext");
+  ASSERT_NE(field, nullptr);
+  ASSERT_TRUE(field->containing_type() == descriptor);
+  const auto* prototype =
+      env_->MutableMessageFactory()->GetPrototype(descriptor);
+  ASSERT_NE(prototype, nullptr);
+  const auto* msg_default = &prototype->GetReflection()->GetMessage(
+      *prototype, field, env_->MutableMessageFactory());
+
   RunExpressionOptions options;
   options.enable_unknowns = GetParam();
 
   ASSERT_OK_AND_ASSIGN(
       CelValue result,
-      RunExpression(&exts, "google.api.expr.runtime.nested_ext", false,
-                    options));
+      RunExpression(CelProtoWrapper::CreateMessage(prototype, &arena_),
+                    "google.api.expr.runtime.nested_ext", false, options));
 
   ASSERT_TRUE(result.IsMessage());
-  EXPECT_THAT(result.MessageOrDie(), Eq(&TestExtensions::default_instance()));
+  EXPECT_THAT(result.MessageOrDie(), Eq(msg_default));
 }
 
 TEST_P(SelectStepConformanceTest, GlobalExtensionsWrapperTest) {
@@ -685,83 +658,18 @@ TEST_P(SelectStepConformanceTest, NullMessageAccessor) {
   CelValue value = CelValue::CreateMessageWrapper(
       CelValue::MessageWrapper(&message, TrivialTypeInfo::GetInstance()));
 
-  ASSERT_OK_AND_ASSIGN(CelValue result,
-                       RunExpression(value, "message_value",
-                                     /*test=*/false,
-                                     /*unknown_path=*/"", options));
+  ASSERT_OK_AND_ASSIGN(CelValue result, RunExpression(value, "message_value",
+                                                      /*test=*/false, options));
 
   ASSERT_TRUE(result.IsError());
   EXPECT_THAT(*result.ErrorOrDie(), StatusIs(absl::StatusCode::kNotFound));
 
   // same for has
   ASSERT_OK_AND_ASSIGN(result, RunExpression(value, "message_value",
-                                             /*test=*/true,
-                                             /*unknown_path=*/"", options));
+                                             /*test=*/true, options));
 
   ASSERT_TRUE(result.IsError());
   EXPECT_THAT(*result.ErrorOrDie(), StatusIs(absl::StatusCode::kNotFound));
-}
-
-TEST_P(SelectStepConformanceTest, CustomAccessor) {
-  TestMessage message;
-  TestMessage* message2 = message.mutable_message_value();
-  message2->set_int32_value(1);
-  message2->set_string_value("test");
-  RunExpressionOptions options;
-  options.enable_unknowns = GetParam();
-  testing::NiceMock<MockAccessor> accessor;
-  CelValue value = CelValue::CreateMessageWrapper(
-      CelValue::MessageWrapper(&message, &accessor));
-
-  ON_CALL(accessor, GetField(_, _, _, _))
-      .WillByDefault(Return(CelValue::CreateInt64(2)));
-  ON_CALL(accessor, HasField(_, _)).WillByDefault(Return(false));
-
-  ASSERT_OK_AND_ASSIGN(CelValue result,
-                       RunExpression(value, "message_value",
-                                     /*test=*/false,
-                                     /*unknown_path=*/"", options));
-
-  EXPECT_THAT(result, test::IsCelInt64(2));
-
-  // testonly select (has)
-  ASSERT_OK_AND_ASSIGN(result, RunExpression(value, "message_value",
-                                             /*test=*/true,
-                                             /*unknown_path=*/"", options));
-
-  EXPECT_THAT(result, test::IsCelBool(false));
-}
-
-TEST_P(SelectStepConformanceTest, CustomAccessorErrorHandling) {
-  TestMessage message;
-  TestMessage* message2 = message.mutable_message_value();
-  message2->set_int32_value(1);
-  message2->set_string_value("test");
-  RunExpressionOptions options;
-  options.enable_unknowns = GetParam();
-  testing::NiceMock<MockAccessor> accessor;
-  CelValue value = CelValue::CreateMessageWrapper(
-      CelValue::MessageWrapper(&message, &accessor));
-
-  ON_CALL(accessor, GetField(_, _, _, _))
-      .WillByDefault(Return(absl::InternalError("bad data")));
-  ON_CALL(accessor, HasField(_, _))
-      .WillByDefault(Return(absl::NotFoundError("not found")));
-
-  // For get field, implementation may return an error-type cel value or a
-  // status (e.g. broken assumption using a core type).
-  ASSERT_OK_AND_ASSIGN(CelValue result,
-                       RunExpression(value, "message_value",
-                                     /*test=*/false,
-                                     /*unknown_path=*/"", options));
-  EXPECT_THAT(result, test::IsCelError(StatusIs(absl::StatusCode::kInternal)));
-
-  // testonly select (has) errors are coerced to CelError.
-  ASSERT_OK_AND_ASSIGN(result, RunExpression(value, "message_value",
-                                             /*test=*/true,
-                                             /*unknown_path=*/"", options));
-
-  EXPECT_THAT(result, test::IsCelError(StatusIs(absl::StatusCode::kNotFound)));
 }
 
 TEST_P(SelectStepConformanceTest, SimpleEnumTest) {

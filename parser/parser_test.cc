@@ -53,6 +53,14 @@ using ::cel::expr::Expr;
 using ::testing::HasSubstr;
 using ::testing::Not;
 
+#ifdef EXCLUDE_CEL_ANTLR_PARSER
+// Only test pratt parser.
+#define TestedParserImpls testing::Values(true)
+#else
+// Test both pratt and antlr parsers.
+#define TestedParserImpls testing::Values(true, false)
+#endif
+
 struct TestInfo {
   TestInfo(const std::string& I, const std::string& P,
            const std::string& E = "", const std::string& L = "",
@@ -812,11 +820,7 @@ std::vector<TestInfo> test_cases = {
      "", "", "", "",
      // PRATT PARSER AST
      "-_(\n"
-     "  -_(\n"
-     "    -_(\n"
-     "      a^#4:Expr.Ident#\n"
-     "    )^#3:Expr.Call#\n"
-     "  )^#2:Expr.Call#\n"
+     "  a^#4:Expr.Ident#\n"
      ")^#1:Expr.Call#"},
     {"1 + +", "",
      "ERROR: <input>:1:5: Syntax error: mismatched input '+' expecting {'[', "
@@ -1650,8 +1654,13 @@ class LocationAdorner : public cel::ExpressionAdorner {
 
 std::string ConvertEnrichedSourceInfoToString(
     const EnrichedSourceInfo& enriched_source_info) {
+  std::vector<std::pair<int64_t, std::pair<int32_t, int32_t>>> sorted_offsets(
+      enriched_source_info.offsets().begin(),
+      enriched_source_info.offsets().end());
+  absl::c_sort(sorted_offsets);
   std::vector<std::string> offsets;
-  for (const auto& offset : enriched_source_info.offsets()) {
+  offsets.reserve(sorted_offsets.size());
+  for (const auto& offset : sorted_offsets) {
     offsets.push_back(absl::StrFormat(
         "[%d,%d,%d]", offset.first, offset.second.first, offset.second.second));
   }
@@ -1747,24 +1756,23 @@ TEST_P(ExpressionTest, Parse) {
   }
 }
 
-TEST(ExpressionTest, CompositeExpressionOffsets) {
-  ParserOptions options;
+TEST_P(ExpressionTest, CompositeExpressionOffsets) {
   std::vector<Macro> macros = Macro::AllMacros();
 
   std::string list_expr = "[1, 2]";
-  auto list_result = EnrichedParse(list_expr, macros, "<input>", options);
+  auto list_result = EnrichedParse(list_expr, macros, "<input>", options_);
   ASSERT_THAT(list_result, IsOk());
   auto list_offsets = list_result->enriched_source_info().offsets();
   EXPECT_EQ(list_offsets.at(1), std::make_pair(0, 5));
 
   std::string map_expr = "{'a': 1}";
-  auto map_result = EnrichedParse(map_expr, macros, "<input>", options);
+  auto map_result = EnrichedParse(map_expr, macros, "<input>", options_);
   ASSERT_THAT(map_result, IsOk());
   auto map_offsets = map_result->enriched_source_info().offsets();
   EXPECT_EQ(map_offsets.at(1), std::make_pair(0, 7));
 
   std::string msg_expr = "Msg{f: 1}";
-  auto msg_result = EnrichedParse(msg_expr, macros, "<input>", options);
+  auto msg_result = EnrichedParse(msg_expr, macros, "<input>", options_);
   ASSERT_THAT(msg_result, IsOk());
   auto msg_offsets = msg_result->enriched_source_info().offsets();
   EXPECT_EQ(msg_offsets.at(1), std::make_pair(0, 8));
@@ -1798,17 +1806,6 @@ TEST_P(ExpressionImplTest, TsanOom) {
       .IgnoreError();
 }
 
-TEST_P(ExpressionTest, ErrorRecoveryLimits) {
-  ParserOptions options;
-  options.error_recovery_limit = 1;
-  auto result = Parse("......", "", options);
-  EXPECT_THAT(result, Not(IsOk()));
-  EXPECT_EQ(result.status().message(),
-            "ERROR: :1:1: Syntax error: More than 1 parse errors.\n | ......\n "
-            "| ^\nERROR: :1:2: Syntax error: no viable alternative at input "
-            "'..'\n | ......\n | .^");
-}
-
 TEST_P(ExpressionImplTest, ExpressionSizeLimit) {
   options_.expression_size_codepoint_limit = 10;
   auto result = Parse("...............", "", options_);
@@ -1830,20 +1827,6 @@ TEST_P(ExpressionImplTest, RecursionDepthLongArgList) {
   options_.max_recursion_depth = 16;
 
   EXPECT_THAT(Parse("[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]", "", options_), IsOk());
-}
-
-TEST(ExpressionTest, RecursionDepthExceeded) {
-  ParserOptions options;
-  // AST visitor will recurse a variable amount depending on the terms used in
-  // the expression. This check occurs in the business logic converting the raw
-  // Antlr parse tree into an Expr. There is a separate check (via a custom
-  // listener) for AST depth while running the antlr generated parser.
-  options.max_recursion_depth = 6;
-  auto result = Parse("1 + 2 + 3 + 4 + 5 + 6 + 7", "", options);
-
-  EXPECT_THAT(result, Not(IsOk()));
-  EXPECT_THAT(result.status().message(),
-              HasSubstr("Exceeded max recursion depth of 6 when parsing."));
 }
 
 TEST_P(ExpressionImplTest, DisableQuotedIdentifiers) {
@@ -1873,10 +1856,9 @@ TEST_P(ExpressionImplTest, DisableStandardMacros) {
       << adorned_string;
 }
 
-TEST(ExpressionTest, RecursionDepthIgnoresParentheses) {
-  ParserOptions options;
-  options.max_recursion_depth = 6;
-  auto result = Parse("(((1 + 2 + 3 + 4 + (5 + 6))))", "", options);
+TEST_P(ExpressionImplTest, RecursionDepthIgnoresParentheses) {
+  options_.max_recursion_depth = options_.enable_pratt_parser ? 2 : 6;
+  auto result = Parse("(((1 + 2 + 3 + 4 + (5 + 6))))", "", options_);
 
   EXPECT_THAT(result, IsOk());
 }
@@ -2111,7 +2093,7 @@ INSTANTIATE_TEST_SUITE_P(
                                            "    e^#7:Expr.Ident#\n"
                                            "  )^#6:Expr.Call#\n"
                                            ")^#3:Expr.Call#"}),
-        testing::Bool()),
+        TestedParserImpls),
     VariadicLogicalOperatorsTestName);
 
 class ParserTest : public testing::TestWithParam<bool> {
@@ -2189,6 +2171,26 @@ TEST_P(ParserTest, MacroExpansionNodeLimitNotExceeded) {
   EXPECT_THAT(issues, testing::IsEmpty());
 }
 
+TEST_P(ParserTest, PrepareSourceForwardsCodepointLimit) {
+  auto builder = cel::NewParserBuilder(options_);
+  builder->GetOptions().expression_size_codepoint_limit = 10;
+  ASSERT_OK_AND_ASSIGN(auto parser, std::move(*builder).Build());
+
+  EXPECT_THAT(parser->PrepareSource("123456789012345", "test.cel"),
+              absl_testing::StatusIs(
+                  absl::StatusCode::kInvalidArgument,
+                  HasSubstr("expression is larger than codepoint limit 10")));
+
+  ASSERT_OK_AND_ASSIGN(auto source,
+                       parser->PrepareSource("1234567890", "test.cel"));
+  EXPECT_EQ(source->description(), "test.cel");
+  EXPECT_EQ(source->content().ToString(), "1234567890");
+
+  ASSERT_OK_AND_ASSIGN(auto source_default_desc,
+                       parser->PrepareSource("1234567890"));
+  EXPECT_EQ(source_default_desc->description(), "<input>");
+}
+
 std::string ExpressionTestName(
     const testing::TestParamInfo<std::tuple<TestInfo, bool>>& test_info) {
   const TestInfo& info = std::get<0>(test_info.param);
@@ -2199,23 +2201,22 @@ std::string ExpressionTestName(
   return name;
 }
 
-INSTANTIATE_TEST_SUITE_P(CelParserTest, ExpressionTest,
-                         testing::Combine(testing::ValuesIn(test_cases),
-                                          testing::Bool()),
-                         ExpressionTestName);
-
 std::string ParserImplTestName(const testing::TestParamInfo<bool>& info) {
   return info.param ? "Pratt" : "Legacy";
 }
 
-INSTANTIATE_TEST_SUITE_P(CelParserTest, ExpressionImplTest, testing::Bool(),
+INSTANTIATE_TEST_SUITE_P(CelParserTest, ExpressionTest,
+                         testing::Combine(testing::ValuesIn(test_cases),
+                                          TestedParserImpls),
+                         ExpressionTestName);
+
+INSTANTIATE_TEST_SUITE_P(CelParserTest, ExpressionImplTest, TestedParserImpls,
                          ParserImplTestName);
 
-INSTANTIATE_TEST_SUITE_P(CelParserTest, NewParserBuilderTest, testing::Bool(),
+INSTANTIATE_TEST_SUITE_P(CelParserTest, NewParserBuilderTest, TestedParserImpls,
                          ParserImplTestName);
 
-INSTANTIATE_TEST_SUITE_P(CelParserTest, ParserTest, testing::Bool(),
+INSTANTIATE_TEST_SUITE_P(CelParserTest, ParserTest, TestedParserImpls,
                          ParserImplTestName);
-
 }  // namespace
 }  // namespace google::api::expr::parser

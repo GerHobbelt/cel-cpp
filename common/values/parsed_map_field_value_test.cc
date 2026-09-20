@@ -102,7 +102,7 @@ TEST_F(ParsedMapFieldValueTest, IsZeroValue) {
   EXPECT_TRUE(value.IsZeroValue());
 }
 
-TEST_F(ParsedMapFieldValueTest, SerializeTo) {
+TEST_F(ParsedMapFieldValueTest, SerializeToEmpty) {
   ParsedMapFieldValue value(
       DynamicParseTextProto<TestAllTypesProto3>(R"pb()pb"),
       DynamicGetField<TestAllTypesProto3>("map_int64_int64"), arena());
@@ -110,6 +110,23 @@ TEST_F(ParsedMapFieldValueTest, SerializeTo) {
   EXPECT_THAT(value.SerializeTo(descriptor_pool(), message_factory(), &output),
               IsOk());
   EXPECT_THAT(std::move(output).Consume(), IsEmpty());
+}
+
+TEST_F(ParsedMapFieldValueTest, SerializeTo) {
+  ParsedMapFieldValue value(
+      DynamicParseTextProto<TestAllTypesProto3>(
+          R"pb(map_string_string { key: "foo" value: "bar" })pb"),
+      DynamicGetField<TestAllTypesProto3>("map_string_string"), arena());
+  google::protobuf::io::CordOutputStream output;
+  EXPECT_THAT(value.SerializeTo(descriptor_pool(), message_factory(), &output),
+              IsOk());
+  google::protobuf::Struct actual;
+  EXPECT_TRUE(actual.ParsePartialFromCord(std::move(output).Consume()));
+  EXPECT_THAT(actual, EqualsTextProto<google::protobuf::Struct>(
+                          R"pb(fields {
+                                 key: "foo"
+                                 value { string_value: "bar" }
+                               })pb"));
 }
 
 TEST_F(ParsedMapFieldValueTest, ConvertToJson) {
@@ -638,6 +655,48 @@ TEST_F(ParsedMapFieldValueTest, NewIterator2) {
                         Pair(StringValueIs("bar"), BoolValueIs(true))))));
   EXPECT_THAT(iterator->Next2(descriptor_pool(), message_factory(), arena()),
               IsOkAndHolds(Eq(std::nullopt)));
+}
+
+TEST_F(ParsedMapFieldValueTest, CloneDefault) {
+  ParsedMapFieldValue value;
+  EXPECT_FALSE(value.Clone(arena()));
+}
+
+TEST_F(ParsedMapFieldValueTest, CloneSameArena) {
+  ParsedMapFieldValue value(
+      DynamicParseTextProto<TestAllTypesProto3>(R"pb(
+        map_string_string { key: "foo" value: "bar" }
+        map_string_string { key: "bar" value: "foo" }
+      )pb"),
+      DynamicGetField<TestAllTypesProto3>("map_string_string"), arena());
+  auto cloned = value.Clone(arena());
+  EXPECT_THAT(
+      cloned.Equal(value, descriptor_pool(), message_factory(), arena()),
+      IsOkAndHolds(BoolValueIs(true)));
+}
+
+TEST_F(ParsedMapFieldValueTest, CloneDifferentArena) {
+  google::protobuf::Arena other_arena;
+  ParsedMapFieldValue value(
+      ::cel::internal::DynamicParseTextProto<TestAllTypesProto3>(
+          &other_arena,
+          R"pb(
+            map_string_string { key: "foo" value: "bar" }
+            map_string_string { key: "bar" value: "foo" }
+          )pb",
+          descriptor_pool(), message_factory()),
+      DynamicGetField<TestAllTypesProto3>("map_string_string"), &other_arena);
+  auto cloned = value.Clone(arena());
+  EXPECT_THAT(
+      cloned.Equal(value, descriptor_pool(), message_factory(), arena()),
+      IsOkAndHolds(BoolValueIs(true)));
+  EXPECT_EQ(cloned.Size(), 2);
+  EXPECT_THAT(cloned.Get(StringValue("foo"), descriptor_pool(),
+                         message_factory(), arena()),
+              IsOkAndHolds(StringValueIs("bar")));
+  EXPECT_THAT(cloned.Get(StringValue("bar"), descriptor_pool(),
+                         message_factory(), arena()),
+              IsOkAndHolds(StringValueIs("foo")));
 }
 
 }  // namespace

@@ -22,6 +22,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 #include "google/protobuf/struct.pb.h"
 #include "absl/base/attributes.h"
@@ -1512,10 +1513,14 @@ Value WrapFieldImpl(
   ABSL_DCHECK(!IsWellKnownMessageType(message->GetDescriptor()));
 
   const auto* reflection = message->GetReflection();
+  if (ABSL_PREDICT_FALSE(reflection == nullptr)) {
+    // This only happens for special implementations of Message that
+    // should not normally be used with CEL.
+    return ErrorValue(absl::InvalidArgumentError(
+        absl::StrCat("failed to get reflection for message type: ",
+                     message->GetDescriptor()->full_name())));
+  }
   if (field->is_map()) {
-    if (reflection->FieldSize(*message, field) == 0) {
-      return MapValue();
-    }
     if constexpr (Unsafe::value) {
       return UnsafeParsedMapFieldValue(message, field);
     } else {
@@ -1524,9 +1529,6 @@ Value WrapFieldImpl(
     }
   }
   if (field->is_repeated()) {
-    if (reflection->FieldSize(*message, field) == 0) {
-      return ListValue();
-    }
     if constexpr (Unsafe::value) {
       return UnsafeParsedRepeatedFieldValue(message, field);
     } else {
@@ -1583,11 +1585,12 @@ Value WrapFieldImpl(
       }
       if constexpr (Unsafe::value) {
         return Value::WrapMessageUnsafe(
-            &reflection->GetMessage(*message, field), descriptor_pool,
-            message_factory, arena);
+            &reflection->GetMessage(*message, field, message_factory),
+            descriptor_pool, message_factory, arena);
       } else {
-        return Value::WrapMessage(&reflection->GetMessage(*message, field),
-                                  descriptor_pool, message_factory, arena);
+        return Value::WrapMessage(
+            &reflection->GetMessage(*message, field, message_factory),
+            descriptor_pool, message_factory, arena);
       }
     case google::protobuf::FieldDescriptor::TYPE_BYTES: {
       std::string scratch;
@@ -1652,6 +1655,13 @@ Value WrapRepeatedFieldImpl(
   ABSL_DCHECK(arena != nullptr);
 
   const auto* reflection = message->GetReflection();
+  if (ABSL_PREDICT_FALSE(reflection == nullptr)) {
+    // This only happens for special implementations of Message that
+    // should not normally be used with CEL.
+    return ErrorValue(absl::InvalidArgumentError(
+        absl::StrCat("failed to get reflection for message type: ",
+                     message->GetDescriptor()->full_name())));
+  }
   const int size = reflection->FieldSize(*message, field);
   if (ABSL_PREDICT_FALSE(index < 0 || index >= size)) {
     return ErrorValue(absl::InvalidArgumentError(

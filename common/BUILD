@@ -640,8 +640,8 @@ cc_test(
     deps = [
         ":source",
         "//internal:testing",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings:cord",
-        "@com_google_absl//absl/types:optional",
     ],
 )
 
@@ -799,6 +799,7 @@ cc_library(
         "//eval/public/structs:legacy_type_adapter",
         "//eval/public/structs:legacy_type_info_apis",
         "//eval/public/structs:proto_message_type_adapter",
+        "//eval/public/structs:trivial_legacy_type_info_internal",
         "//extensions/protobuf/internal:map_reflection",
         "//extensions/protobuf/internal:qualify",
         "//internal:casts",
@@ -885,7 +886,9 @@ cc_test(
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:optional",
+        "@com_google_cel_spec//proto/cel/expr/conformance/proto2:test_all_types_cc_proto",
         "@com_google_cel_spec//proto/cel/expr/conformance/proto3:test_all_types_cc_proto",
+        "@com_google_protobuf//:field_mask_cc_proto",
         "@com_google_protobuf//:protobuf",
         "@com_google_protobuf//:struct_cc_proto",
         "@com_google_protobuf//:type_cc_proto",
