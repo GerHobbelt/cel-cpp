@@ -28,9 +28,11 @@ cc_library(
         "//parser:options",
         "//parser:parser_interface",
         "//validator",
+        "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
+        "@com_google_protobuf//:protobuf",
     ],
 )
 
@@ -40,10 +42,12 @@ cc_library(
     hdrs = ["compiler_factory.h"],
     deps = [
         ":compiler",
+        "//checker:type_check_issue",
         "//checker:type_checker",
         "//checker:type_checker_builder",
         "//checker:type_checker_builder_factory",
         "//checker:validation_result",
+        "//common:ast",
         "//common:source",
         "//internal:noop_delete",
         "//internal:status_macros",
@@ -66,6 +70,7 @@ cc_test(
     deps = [
         ":compiler",
         ":compiler_factory",
+        ":optional",
         ":standard_library",
         "//checker:optional",
         "//checker:standard_library",

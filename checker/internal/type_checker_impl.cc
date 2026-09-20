@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "absl/base/nullability.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/absl_check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
@@ -37,8 +39,10 @@
 #include "checker/internal/format_type_name.h"
 #include "checker/internal/namespace_generator.h"
 #include "checker/internal/type_check_env.h"
+#include "checker/internal/type_checker_builder_impl.h"
 #include "checker/internal/type_inference_context.h"
 #include "checker/type_check_issue.h"
+#include "checker/type_checker_builder.h"
 #include "checker/validation_result.h"
 #include "common/ast.h"
 #include "common/ast_rewrite.h"
@@ -55,6 +59,15 @@
 
 namespace cel::checker_internal {
 namespace {
+
+bool MatchesBlock(const Expr& expr) {
+  if (!expr.has_call_expr()) {
+    return false;
+  }
+  const auto& call = expr.call_expr();
+  return call.function() == "cel.@block" && call.args().size() == 2 &&
+         call.args()[0].has_list_expr();
+}
 
 using AstType = cel::TypeSpec;
 using Severity = TypeCheckIssue::Severity;
@@ -187,14 +200,12 @@ class ResolveVisitor : public AstVisitorBase {
     bool requires_disambiguation;
   };
 
-  ResolveVisitor(absl::string_view container,
-                 NamespaceGenerator namespace_generator,
+  ResolveVisitor(NamespaceGenerator namespace_generator,
                  const TypeCheckEnv& env, const Ast& ast,
                  TypeInferenceContext& inference_context,
                  std::vector<TypeCheckIssue>& issues,
                  google::protobuf::Arena* absl_nonnull arena)
-      : container_(container),
-        namespace_generator_(std::move(namespace_generator)),
+      : namespace_generator_(std::move(namespace_generator)),
         env_(&env),
         inference_context_(&inference_context),
         issues_(&issues),
@@ -203,13 +214,23 @@ class ResolveVisitor : public AstVisitorBase {
         arena_(arena),
         current_scope_(&root_scope_) {}
 
-  void PreVisitExpr(const Expr& expr) override { expr_stack_.push_back(&expr); }
+  void PreVisitExpr(const Expr& expr) override {
+    expr_stack_.push_back(&expr);
+    if (expr_stack_.size() == 1 && MatchesBlock(expr)) {
+      ABSL_DCHECK_EQ(expr.call_expr().args().size(), 2);
+      ABSL_DCHECK(block_init_list_ == nullptr);
+      block_init_list_ = &expr.call_expr().args()[0];
+    }
+  }
 
   void PostVisitExpr(const Expr& expr) override {
     if (expr_stack_.empty()) {
       return;
     }
     expr_stack_.pop_back();
+    if (expr_stack_.size() == 2 && expr_stack_.back() == block_init_list_) {
+      HandleBlockIndex(&expr);
+    }
   }
 
   void PostVisitConst(const Expr& expr, const Constant& constant) override;
@@ -326,7 +347,7 @@ class ResolveVisitor : public AstVisitorBase {
     ReportIssue(TypeCheckIssue::CreateError(
         ast_->ComputeSourceLocation(expr.id()),
         absl::StrCat("undeclared reference to '", name, "' (in container '",
-                     container_, "')")));
+                     env_->container().container(), "')")));
   }
 
   void ReportUndefinedField(int64_t expr_id, absl::string_view field_name,
@@ -388,6 +409,7 @@ class ResolveVisitor : public AstVisitorBase {
                                       absl::string_view field_name);
 
   void HandleOptSelect(const Expr& expr);
+  void HandleBlockIndex(const Expr* expr);
 
   // Get the assigned type of the given subexpression. Should only be called if
   // the given subexpression is expected to have already been checked.
@@ -407,7 +429,6 @@ class ResolveVisitor : public AstVisitorBase {
     return DynType();
   }
 
-  absl::string_view container_;
   NamespaceGenerator namespace_generator_;
   const TypeCheckEnv* absl_nonnull env_;
   TypeInferenceContext* absl_nonnull inference_context_;
@@ -421,6 +442,7 @@ class ResolveVisitor : public AstVisitorBase {
   std::vector<const Expr*> expr_stack_;
   absl::flat_hash_map<const Expr*, std::vector<std::string>>
       maybe_namespaced_functions_;
+  const Expr* block_init_list_ = nullptr;
   // Select operations that need to be resolved outside of the traversal.
   // These are handled separately to disambiguate between namespaces and field
   // accesses
@@ -609,8 +631,15 @@ void ResolveVisitor::PostVisitMap(const Expr& expr, const MapExpr& map) {
 }
 
 void ResolveVisitor::PostVisitList(const Expr& expr, const ListExpr& list) {
-  // Follows list type inferencing behavior in Go (see map comments above).
+  if (&expr == block_init_list_) {
+    // Don't try to coalesce list type here because it can influence the
+    // resolved type of the list elements. cel.@block is always list<dyn> and
+    // the elements are treated independently at runtime.
+    types_[&expr] = ListType();
+    return;
+  }
 
+  // Follows list type inferencing behavior in Go (see map comments above).
   Type overall_elem_type =
       inference_context_->InstantiateTypeParams(TypeParamType("E"));
   auto assignability_context = inference_context_->CreateAssignabilityContext();
@@ -1172,16 +1201,56 @@ void ResolveVisitor::HandleOptSelect(const Expr& expr) {
   }
 }
 
+void ResolveVisitor::HandleBlockIndex(const Expr* expr) {
+  ABSL_DCHECK(block_init_list_ != nullptr);
+  ABSL_DCHECK(block_init_list_->has_list_expr());
+  const auto& elements = block_init_list_->list_expr().elements();
+  int index = -1;
+  for (size_t i = 0; i < elements.size(); ++i) {
+    if (&elements[i].expr() == expr) {
+      index = i;
+      break;
+    }
+  }
+  if (index < 0) {
+    status_.Update(absl::InternalError(
+        "could not resolve expression as a cel.@block subexpression"));
+    return;
+  }
+  std::string var_name = absl::StrCat("@index", index);
+
+  // Block is typically manually assembled from logically separate
+  // expressions so fix the type instead of inferring any remaining free type
+  // params as for normal subexpressions.
+  auto type = inference_context_->FinalizeType(GetDeducedType(expr));
+
+  VariableDecl decl = MakeVariableDecl(var_name, std::move(type));
+
+  // The C++ runtime requires that the indexes are topologically ordered.
+  // They just come into scope in order as we walk the AST so we don't need
+  // to do any additional work to check references to other initializers in
+  // an init expr.
+  //
+  // TODO(uncreated-issue/90): This is slightly inconsistent with the java
+  // runtime implementation which just requires the references to be acyclic.
+  auto* scope =
+      comprehension_vars_.emplace_back(current_scope_->MakeNestedScope()).get();
+  scope->InsertVariableIfAbsent(std::move(decl));
+  current_scope_ = scope;
+}
+
 class ResolveRewriter : public AstRewriterBase {
  public:
   explicit ResolveRewriter(const ResolveVisitor& visitor,
                            const TypeInferenceContext& inference_context,
                            const CheckerOptions& options,
-                           Ast::ReferenceMap& references, Ast::TypeMap& types)
+                           Ast::ReferenceMap& references, Ast::TypeMap& types,
+                           ValidationResult::TypeMap& resolved_types)
       : visitor_(visitor),
         inference_context_(inference_context),
         reference_map_(references),
         type_map_(types),
+        resolved_types_(resolved_types),
         options_(options) {}
   bool PostVisitRewrite(Expr& expr) override {
     bool rewritten = false;
@@ -1228,14 +1297,15 @@ class ResolveRewriter : public AstRewriterBase {
 
     if (auto iter = visitor_.types().find(&expr);
         iter != visitor_.types().end()) {
-      auto flattened_type =
-          FlattenType(inference_context_.FinalizeType(iter->second));
+      cel::Type finalized_type = inference_context_.FinalizeType(iter->second);
+      auto flattened_type = FlattenType(finalized_type);
 
       if (!flattened_type.ok()) {
         status_.Update(flattened_type.status());
         return rewritten;
       }
       type_map_[expr.id()] = *std::move(flattened_type);
+      resolved_types_[expr.id()] = finalized_type;
       rewritten = true;
     }
 
@@ -1250,23 +1320,28 @@ class ResolveRewriter : public AstRewriterBase {
   const TypeInferenceContext& inference_context_;
   Ast::ReferenceMap& reference_map_;
   Ast::TypeMap& type_map_;
+  ValidationResult::TypeMap& resolved_types_;
   const CheckerOptions& options_;
 };
 
 }  // namespace
 
-absl::StatusOr<ValidationResult> TypeCheckerImpl::Check(
-    std::unique_ptr<Ast> ast) const {
-  google::protobuf::Arena type_arena;
+absl::StatusOr<ValidationResult> TypeCheckerImpl::CheckImpl(
+    std::unique_ptr<Ast> ast, google::protobuf::Arena* arena) const {
+  std::optional<google::protobuf::Arena> type_arena;
+  if (arena == nullptr) {
+    type_arena.emplace();
+    arena = &(*type_arena);
+  }
 
   std::vector<TypeCheckIssue> issues;
   CEL_ASSIGN_OR_RETURN(auto generator,
                        NamespaceGenerator::Create(env_.container()));
 
   TypeInferenceContext type_inference_context(
-      &type_arena, options_.enable_legacy_null_assignment);
-  ResolveVisitor visitor(env_.container(), std::move(generator), env_, *ast,
-                         type_inference_context, issues, &type_arena);
+      arena, options_.enable_legacy_null_assignment);
+  ResolveVisitor visitor(std::move(generator), env_, *ast,
+                         type_inference_context, issues, arena);
 
   TraversalOptions opts;
   opts.use_comprehension_callbacks = true;
@@ -1311,9 +1386,10 @@ absl::StatusOr<ValidationResult> TypeCheckerImpl::Check(
   // Apply updates as needed.
   // Happens in a second pass to simplify validating that pointers haven't
   // been invalidated by other updates.
+  ValidationResult::TypeMap resolved_types;
   ResolveRewriter rewriter(visitor, type_inference_context, options_,
                            ast->mutable_reference_map(),
-                           ast->mutable_type_map());
+                           ast->mutable_type_map(), resolved_types);
   AstRewrite(ast->mutable_root_expr(), rewriter);
 
   CEL_RETURN_IF_ERROR(rewriter.status());
@@ -1326,7 +1402,19 @@ absl::StatusOr<ValidationResult> TypeCheckerImpl::Check(
                            {cel::ExtensionSpec::Component::kRuntime}));
   }
 
-  return ValidationResult(std::move(ast), std::move(issues));
+  auto result = ValidationResult(std::move(ast), std::move(issues));
+  if (!type_arena.has_value()) {
+    // cel::Type values will expire after this function returns when the local
+    // arena is destructed. Only set the resolved type map if we're using the
+    // caller's arena.
+    result.SetResolvedTypeMap(std::move(resolved_types));
+  }
+
+  return result;
+}
+
+std::unique_ptr<TypeCheckerBuilder> TypeCheckerImpl::ToBuilder() const {
+  return std::make_unique<TypeCheckerBuilderImpl>(options_, env_);
 }
 
 }  // namespace cel::checker_internal

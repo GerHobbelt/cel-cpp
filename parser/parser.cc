@@ -112,13 +112,12 @@ struct ParserError {
 };
 
 std::string DisplayParserError(const cel::Source& source,
-                               const ParserError& error) {
-  auto location =
-      source.GetLocation(error.range.begin).value_or(SourceLocation{});
+                               SourceLocation location,
+                               absl::string_view message) {
   return absl::StrCat(absl::StrFormat("ERROR: %s:%zu:%zu: %s",
                                       source.description(), location.line,
                                       // add one to the 0-based column
-                                      location.column + 1, error.message),
+                                      location.column + 1, message),
                       source.DisplayErrorLocation(location));
 }
 
@@ -163,9 +162,8 @@ SourceRange SourceRangeFromParserRuleContext(
 
 class ParserMacroExprFactory final : public MacroExprFactory {
  public:
-  explicit ParserMacroExprFactory(const cel::Source& source,
-                                  absl::string_view accu_var)
-      : MacroExprFactory(accu_var), source_(source) {}
+  explicit ParserMacroExprFactory(const cel::Source& source)
+      : source_(source) {}
 
   void BeginMacro(SourceRange macro_position) {
     macro_position_ = macro_position;
@@ -210,7 +208,7 @@ class ParserMacroExprFactory final : public MacroExprFactory {
 
   bool HasErrors() const { return error_count_ != 0; }
 
-  std::string ErrorMessage() {
+  std::vector<cel::ParseIssue> CollectIssues() {
     // Errors are collected as they are encountered, not by their location
     // within the source. To have a more stable error message as implementation
     // details change, we sort the collected errors by their source location
@@ -227,20 +225,23 @@ class ParserMacroExprFactory final : public MacroExprFactory {
         });
     // Build the summary error message using the sorted errors.
     bool errors_truncated = error_count_ > 100;
-    std::vector<std::string> messages;
-    messages.reserve(
+    std::vector<cel::ParseIssue> issues;
+    issues.reserve(
         errors_.size() +
         errors_truncated);  // Reserve space for the transform and an
                             // additional element when truncation occurs.
-    std::transform(errors_.begin(), errors_.end(), std::back_inserter(messages),
-                   [this](const ParserError& error) {
-                     return cel::DisplayParserError(source_, error);
-                   });
+    std::transform(
+        errors_.begin(), errors_.end(), std::back_inserter(issues),
+        [this](const ParserError& error) {
+          auto location =
+              source_.GetLocation(error.range.begin).value_or(SourceLocation{});
+          return cel::ParseIssue(location, error.message);
+        });
     if (errors_truncated) {
-      messages.emplace_back(
-          absl::StrCat(error_count_ - 100, " more errors were truncated."));
+      issues.push_back(cel::ParseIssue(
+          absl::StrCat(error_count_ - 100, " more errors were truncated.")));
     }
-    return absl::StrJoin(messages, "\n");
+    return issues;
   }
 
   void AddMacroCall(int64_t macro_id, absl::string_view function,
@@ -603,17 +604,25 @@ Expr ExpressionBalancer::BalancedTree(int lo, int hi) {
   return factory_.NewCall(ops_[mid], function_, std::move(arguments));
 }
 
+std::string FormatIssues(const cel::Source& source,
+                         absl::Span<const cel::ParseIssue> issues) {
+  return absl::StrJoin(
+      issues, "\n", [&source](std::string* out, const cel::ParseIssue& issue) {
+        absl::StrAppend(out, cel::DisplayParserError(source, issue.location(),
+                                                     issue.message()));
+      });
+}
+
 class ParserVisitor final : public CelBaseVisitor,
                             public antlr4::BaseErrorListener {
  public:
   ParserVisitor(const cel::Source& source, int max_recursion_depth,
-                absl::string_view accu_var,
                 const cel::MacroRegistry& macro_registry,
                 bool add_macro_calls = false,
                 bool enable_optional_syntax = false,
                 bool enable_quoted_identifiers = false)
       : source_(source),
-        factory_(source_, accu_var),
+        factory_(source_),
         macro_registry_(macro_registry),
         recursion_depth_(0),
         max_recursion_depth_(max_recursion_depth),
@@ -675,7 +684,7 @@ class ParserVisitor final : public CelBaseVisitor,
                    const std::string& msg, std::exception_ptr e) override;
   bool HasErrored() const;
 
-  std::string ErrorMessage();
+  std::vector<cel::ParseIssue> CollectIssues();
 
  private:
   template <typename... Args>
@@ -1436,7 +1445,9 @@ void ParserVisitor::syntaxError(antlr4::Recognizer* recognizer,
 
 bool ParserVisitor::HasErrored() const { return factory_.HasErrors(); }
 
-std::string ParserVisitor::ErrorMessage() { return factory_.ErrorMessage(); }
+std::vector<cel::ParseIssue> ParserVisitor::CollectIssues() {
+  return factory_.CollectIssues();
+}
 
 Expr ParserVisitor::GlobalCallOrMacroImpl(int64_t expr_id,
                                           absl::string_view function,
@@ -1640,9 +1651,10 @@ struct ParseResult {
   EnrichedSourceInfo enriched_source_info;
 };
 
-absl::StatusOr<ParseResult> ParseImpl(const cel::Source& source,
-                                      const cel::MacroRegistry& registry,
-                                      const ParserOptions& options) {
+absl::StatusOr<ParseResult> ParseImpl(
+    const cel::Source& source, const cel::MacroRegistry& registry,
+    const ParserOptions& options,
+    std::vector<cel::ParseIssue>* parse_issues = nullptr) {
   try {
     CodePointStream input(source.content(), source.description());
     if (input.size() > options.expression_size_codepoint_limit) {
@@ -1654,14 +1666,9 @@ absl::StatusOr<ParseResult> ParseImpl(const cel::Source& source,
     CommonTokenStream tokens(&lexer);
     CelParser parser(&tokens);
     ExprRecursionListener listener(options.max_recursion_depth);
-    absl::string_view accu_var = cel::kAccumulatorVariableName;
-    if (options.enable_hidden_accumulator_var) {
-      accu_var = cel::kHiddenAccumulatorVariableName;
-    }
-    ParserVisitor visitor(source, options.max_recursion_depth, accu_var,
-                          registry, options.add_macro_calls,
-                          options.enable_optional_syntax,
-                          options.enable_quoted_identifiers);
+    ParserVisitor visitor(
+        source, options.max_recursion_depth, registry, options.add_macro_calls,
+        options.enable_optional_syntax, options.enable_quoted_identifiers);
 
     lexer.removeErrorListeners();
     parser.removeErrorListeners();
@@ -1680,13 +1687,23 @@ absl::StatusOr<ParseResult> ParseImpl(const cel::Source& source,
       expr = ExprFromAny(visitor.visit(parser.start()));
     } catch (const ParseCancellationException& e) {
       if (visitor.HasErrored()) {
-        return absl::InvalidArgumentError(visitor.ErrorMessage());
+        auto issues = visitor.CollectIssues();
+        std::string error_message = FormatIssues(source, issues);
+        if (parse_issues != nullptr) {
+          *parse_issues = std::move(issues);
+        }
+        return absl::InvalidArgumentError(error_message);
       }
       return absl::CancelledError(e.what());
     }
 
     if (visitor.HasErrored()) {
-      return absl::InvalidArgumentError(visitor.ErrorMessage());
+      auto issues = visitor.CollectIssues();
+      std::string error_message = FormatIssues(source, issues);
+      if (parse_issues != nullptr) {
+        *parse_issues = std::move(issues);
+      }
+      return absl::InvalidArgumentError(error_message);
     }
 
     return {
@@ -1707,19 +1724,28 @@ absl::StatusOr<ParseResult> ParseImpl(const cel::Source& source,
 class ParserImpl : public cel::Parser {
  public:
   explicit ParserImpl(const ParserOptions& options,
-                      cel::MacroRegistry macro_registry)
-      : options_(options), macro_registry_(std::move(macro_registry)) {}
-  absl::StatusOr<std::unique_ptr<cel::Ast>> Parse(
-      const cel::Source& source) const override {
+                      cel::MacroRegistry macro_registry,
+                      absl::flat_hash_set<std::string> library_ids)
+      : options_(options),
+        macro_registry_(std::move(macro_registry)),
+        library_ids_(std::move(library_ids)) {}
+
+  absl::StatusOr<std::unique_ptr<cel::Ast>> ParseImpl(
+      const cel::Source& source,
+      std::vector<cel::ParseIssue>* parse_issues) const override {
     CEL_ASSIGN_OR_RETURN(auto parse_result,
-                         ParseImpl(source, macro_registry_, options_));
+                         ::google::api::expr::parser::ParseImpl(
+                             source, macro_registry_, options_, parse_issues));
     return std::make_unique<cel::Ast>(std::move(parse_result.expr),
                                       std::move(parse_result.source_info));
   }
 
+  std::unique_ptr<cel::ParserBuilder> ToBuilder() const override;
+
  private:
   const ParserOptions options_;
   const cel::MacroRegistry macro_registry_;
+  absl::flat_hash_set<std::string> library_ids_;
 };
 
 class ParserBuilderImpl : public cel::ParserBuilder {
@@ -1796,27 +1822,41 @@ class ParserBuilderImpl : public cel::ParserBuilder {
       macros_.clear();
     }
 
+    absl::flat_hash_set<std::string> library_ids(library_ids_);
+
     // Hack to support adding the standard library macros either by option or
     // with a library configurer.
     if (!options_.disable_standard_macros && !library_ids_.contains("stdlib")) {
       CEL_RETURN_IF_ERROR(macro_registry.RegisterMacros(Macro::AllMacros()));
+      library_ids.insert("stdlib");
     }
 
     if (options_.enable_optional_syntax && !library_ids_.contains("optional")) {
       CEL_RETURN_IF_ERROR(macro_registry.RegisterMacro(cel::OptMapMacro()));
       CEL_RETURN_IF_ERROR(macro_registry.RegisterMacro(cel::OptFlatMapMacro()));
+      library_ids.insert("optional");
     }
     CEL_RETURN_IF_ERROR(macro_registry.RegisterMacros(individual_macros));
-    return std::make_unique<ParserImpl>(options_, std::move(macro_registry));
+    return std::make_unique<ParserImpl>(options_, std::move(macro_registry),
+                                        std::move(library_ids));
   }
 
  private:
+  friend class ParserImpl;
+
   ParserOptions options_;
   std::vector<cel::Macro> macros_;
   absl::flat_hash_set<std::string> library_ids_;
   std::vector<cel::ParserLibrary> libraries_;
   absl::flat_hash_map<std::string, cel::ParserLibrarySubset> library_subsets_;
 };
+
+std::unique_ptr<cel::ParserBuilder> ParserImpl::ToBuilder() const {
+  auto ins = std::make_unique<ParserBuilderImpl>(options_);
+  ins->library_ids_ = library_ids_;
+  ins->macros_ = macro_registry_.ListMacros();
+  return ins;
+}
 
 }  // namespace
 

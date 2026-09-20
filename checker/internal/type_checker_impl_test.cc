@@ -26,6 +26,7 @@
 #include "absl/log/absl_check.h"
 #include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
@@ -33,8 +34,11 @@
 #include "checker/internal/test_ast_helpers.h"
 #include "checker/internal/type_check_env.h"
 #include "checker/type_check_issue.h"
+#include "checker/type_checker_builder.h"
 #include "checker/validation_result.h"
 #include "common/ast.h"
+#include "common/ast_proto.h"
+#include "common/container.h"
 #include "common/decl.h"
 #include "common/expr.h"
 #include "common/source.h"
@@ -43,7 +47,10 @@
 #include "internal/status_macros.h"
 #include "internal/testing.h"
 #include "internal/testing_descriptor_pool.h"
+#include "parser/macro_registry.h"
+#include "parser/parser.h"
 #include "testutil/baseline_tests.h"
+#include "testutil/test_macros.h"
 #include "cel/expr/conformance/proto2/test_all_types.pb.h"
 #include "cel/expr/conformance/proto3/test_all_types.pb.h"
 #include "google/protobuf/arena.h"
@@ -74,6 +81,7 @@ using AstType = cel::TypeSpec;
 using Severity = TypeCheckIssue::Severity;
 
 namespace testpb3 = ::cel::expr::conformance::proto3;
+namespace testpb2 = ::cel::expr::conformance::proto2;
 
 std::string SevString(Severity severity) {
   switch (severity) {
@@ -103,6 +111,17 @@ namespace {
 google::protobuf::Arena* absl_nonnull TestTypeArena() {
   static absl::NoDestructor<google::protobuf::Arena> kArena;
   return &(*kArena);
+}
+
+absl::StatusOr<std::unique_ptr<Ast>> MakeTestParsedAstWithMacros(
+    absl::string_view expression, const cel::MacroRegistry& registry) {
+  CEL_ASSIGN_OR_RETURN(
+      auto source,
+      cel::NewSource(expression, /*description=*/std::string(expression)));
+  CEL_ASSIGN_OR_RETURN(auto parsed_expr, google::api::expr::parser::Parse(
+                                             *source, registry,
+                                             {.enable_optional_syntax = true}));
+  return cel::CreateAstFromParsedExpr(parsed_expr);
 }
 
 FunctionDecl MakeIdentFunction() {
@@ -269,6 +288,12 @@ absl::Status RegisterMinimalBuiltins(google::protobuf::Arena* absl_nonnull arena
                        /*return_type=*/TypeType(arena, TypeParamType("A")),
                        TypeParamType("A"))));
 
+  Type kParam(TypeParamType("T"));
+  CEL_ASSIGN_OR_RETURN(
+      auto block_decl,
+      MakeFunctionDecl("cel.@block", MakeOverloadDecl("cel_block_list", kParam,
+                                                      ListType(), kParam)));
+
   env.InsertFunctionIfAbsent(std::move(not_op));
   env.InsertFunctionIfAbsent(std::move(not_strictly_false));
   env.InsertFunctionIfAbsent(std::move(add_op));
@@ -286,6 +311,7 @@ absl::Status RegisterMinimalBuiltins(google::protobuf::Arena* absl_nonnull arena
   env.InsertFunctionIfAbsent(std::move(to_type));
   env.InsertFunctionIfAbsent(std::move(to_duration));
   env.InsertFunctionIfAbsent(std::move(to_timestamp));
+  env.InsertFunctionIfAbsent(std::move(block_decl));
 
   return absl::OkStatus();
 }
@@ -303,6 +329,78 @@ TEST(TypeCheckerImplTest, SmokeTest) {
   EXPECT_TRUE(result.IsValid());
 
   EXPECT_THAT(result.GetIssues(), IsEmpty());
+}
+
+TEST(TypeCheckerImplTest, BlockMacroSupport) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+
+  google::protobuf::Arena arena;
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  MacroRegistry registry;
+  ASSERT_THAT(cel::test::RegisterTestMacros(registry), IsOk());
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(
+      auto ast,
+      MakeTestParsedAstWithMacros(
+          "cel.block([1, 2], cel.index(0) + cel.index(1))", registry));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  EXPECT_TRUE(result.IsValid());
+  EXPECT_THAT(result.GetIssues(), IsEmpty());
+
+  // Overall type should be int.
+  ASSERT_OK_AND_ASSIGN(auto checked_ast, result.ReleaseAst());
+  auto root_id = checked_ast->root_expr().id();
+  EXPECT_EQ(checked_ast->type_map().at(root_id).primitive(),
+            PrimitiveType::kInt64);
+}
+
+TEST(TypeCheckerImplTest, BlockMacroSupportMixedTypes) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+
+  google::protobuf::Arena arena;
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  MacroRegistry registry;
+  ASSERT_THAT(cel::test::RegisterTestMacros(registry), IsOk());
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(
+      auto ast, MakeTestParsedAstWithMacros("cel.block([1, 'a'], cel.index(1))",
+                                            registry));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  EXPECT_TRUE(result.IsValid());
+  EXPECT_THAT(result.GetIssues(), IsEmpty());
+
+  // cel.index(1) refers to 'a' which is string.
+  // So overall type should be string.
+  ASSERT_OK_AND_ASSIGN(auto checked_ast, result.ReleaseAst());
+  auto root_id = checked_ast->root_expr().id();
+  EXPECT_EQ(checked_ast->type_map().at(root_id).primitive(),
+            PrimitiveType::kString);
+}
+
+TEST(TypeCheckerImplTest, BadIndex) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+
+  google::protobuf::Arena arena;
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  MacroRegistry registry;
+  ASSERT_THAT(cel::test::RegisterTestMacros(registry), IsOk());
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(
+      auto ast, MakeTestParsedAstWithMacros("cel.block([1, 'a'], cel.index(2))",
+                                            registry));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  EXPECT_FALSE(result.IsValid());
+  EXPECT_THAT(result.FormatError(),
+              HasSubstr("undeclared reference to '@index2' (in container"));
 }
 
 TEST(TypeCheckerImplTest, SimpleIdentsResolved) {
@@ -582,6 +680,34 @@ TEST(TypeCheckerImplTest, NamespacedFunctionSkipsFieldCheck) {
   EXPECT_FALSE(checked_ast->root_expr().call_expr().has_target());
 }
 
+TEST(TypeCheckerImplTest, NamespacedFunctionWithAbbreviation) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  // Variables
+  env.InsertVariableIfAbsent(MakeVariableDecl("x", IntType()));
+
+  FunctionDecl foo;
+  foo.set_name("x.y.foo");
+  ASSERT_THAT(
+      foo.AddOverload(MakeOverloadDecl("x_y_foo_int",
+                                       /*return_type=*/IntType(), IntType())),
+      IsOk());
+  env.InsertFunctionIfAbsent(std::move(foo));
+  env.set_container(*MakeExpressionContainer("", "x.y.foo"));
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("foo(x)"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  EXPECT_TRUE(result.IsValid());
+  EXPECT_THAT(result.GetIssues(), IsEmpty());
+
+  ASSERT_OK_AND_ASSIGN(auto checked_ast, result.ReleaseAst());
+  EXPECT_TRUE(checked_ast->root_expr().has_call_expr())
+      << absl::StrCat("kind: ", checked_ast->root_expr().kind().index());
+  EXPECT_EQ(checked_ast->root_expr().call_expr().function(), "x.y.foo");
+  EXPECT_FALSE(checked_ast->root_expr().call_expr().has_target());
+}
+
 TEST(TypeCheckerImplTest, MixedListTypeToDyn) {
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
 
@@ -757,7 +883,7 @@ TEST(TypeCheckerImplTest, NestedComprehensions) {
 
 TEST(TypeCheckerImplTest, ComprehensionVarsShadowNamespacePriorityRules) {
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
-  env.set_container("com");
+  env.set_container(*MakeExpressionContainer("com"));
   google::protobuf::Arena arena;
   ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
 
@@ -1383,6 +1509,44 @@ TEST(TypeCheckerImplTest, ExpectedTypeDoesntMatch) {
           "expected type 'map(string, string)' but found 'map(string, int)'")));
 }
 
+TEST(TypeCheckerImplTest, ToBuilder) {
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  TypeCheckerImpl impl(std::move(env));
+  auto builder = impl.ToBuilder();
+  ASSERT_THAT(builder->AddVariable(MakeVariableDecl("x", IntType())), IsOk());
+  ASSERT_OK_AND_ASSIGN(auto new_checker, builder->Build());
+
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("x"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result,
+                       new_checker->Check(std::move(ast)));
+  EXPECT_TRUE(result.IsValid());
+}
+
+TEST(TypeCheckerImplTest, ToBuilderPropagatesArena) {
+  auto arena = std::make_shared<google::protobuf::Arena>();
+
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  env.set_arena(arena);
+
+  Type list_type = ListType(arena.get(), IntType());
+  ASSERT_TRUE(
+      env.InsertVariableIfAbsent(MakeVariableDecl("my_list", list_type)));
+
+  auto base_checker = std::make_unique<TypeCheckerImpl>(std::move(env));
+
+  std::unique_ptr<TypeCheckerBuilder> builder = base_checker->ToBuilder();
+
+  base_checker.reset();
+  arena.reset();
+
+  ASSERT_OK_AND_ASSIGN(auto derived_checker, builder->Build());
+
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("my_list"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result,
+                       derived_checker->Check(std::move(ast)));
+  EXPECT_TRUE(result.IsValid());
+}
+
 TEST(TypeCheckerImplTest, BadSourcePosition) {
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
 
@@ -1462,7 +1626,7 @@ TEST(TypeCheckerImplTest, BadLineOffsets) {
 
 TEST(TypeCheckerImplTest, ContainerLookupForMessageCreation) {
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
-  env.set_container("google.protobuf");
+  env.set_container(*MakeExpressionContainer("google.protobuf"));
   env.AddTypeProvider(std::make_unique<TypeIntrospector>());
 
   TypeCheckerImpl impl(std::move(env));
@@ -1483,7 +1647,7 @@ TEST(TypeCheckerImplTest, ContainerLookupForMessageCreation) {
 
 TEST(TypeCheckerImplTest, ContainerLookupForMessageCreationNoRewrite) {
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
-  env.set_container("google.protobuf");
+  env.set_container(*MakeExpressionContainer("google.protobuf"));
   env.AddTypeProvider(std::make_unique<TypeIntrospector>());
 
   CheckerOptions options;
@@ -1508,7 +1672,7 @@ TEST(TypeCheckerImplTest, ContainerLookupForMessageCreationNoRewrite) {
 
 TEST(TypeCheckerImplTest, EnumValueCopiedToReferenceMap) {
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
-  env.set_container("cel.expr.conformance.proto3");
+  env.set_container(*MakeExpressionContainer("cel.expr.conformance.proto3"));
 
   TypeCheckerImpl impl(std::move(env));
   ASSERT_OK_AND_ASSIGN(auto ast,
@@ -1538,7 +1702,7 @@ TEST_P(WktCreationTest, MessageCreation) {
   const CheckedExprTestCase& test_case = GetParam();
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
   env.AddTypeProvider(std::make_unique<TypeIntrospector>());
-  env.set_container("google.protobuf");
+  env.set_container(*MakeExpressionContainer("google.protobuf"));
 
   ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
 
@@ -1688,15 +1852,229 @@ INSTANTIATE_TEST_SUITE_P(
             .expected_result_type = AstType(PrimitiveType::kBool),
         }));
 
+TEST(AliasTest, ImportVariable) {
+  google::protobuf::Arena arena;
+
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  ASSERT_OK_AND_ASSIGN(ExpressionContainer container,
+                       MakeExpressionContainer("cel.expr.conformance",
+                                               "com.example.TestVariable1",
+                                               "com.example.TestVariable2"));
+  env.set_container(std::move(container));
+
+  google::protobuf::LinkMessageReflection<testpb3::TestAllTypes>();
+  google::protobuf::LinkMessageReflection<testpb2::TestAllTypes>();
+
+  ASSERT_TRUE(env.InsertVariableIfAbsent(
+      MakeVariableDecl("com.example.TestVariable1",
+                       MessageType(testpb3::TestAllTypes::descriptor()))));
+  ASSERT_TRUE(env.InsertVariableIfAbsent(
+      MakeVariableDecl("com.example.TestVariable2",
+                       MessageType(testpb2::TestAllTypes::descriptor()))));
+
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(
+      auto ast,
+      MakeTestParsedAst(
+          "TestVariable1.single_int64 == TestVariable2.single_int64"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  ASSERT_TRUE(result.IsValid()) << result.FormatError();
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> checked_ast, result.ReleaseAst());
+
+  ASSERT_TRUE(checked_ast->root_expr().has_call_expr());
+  ASSERT_EQ(checked_ast->root_expr().call_expr().function(), "_==_");
+  ASSERT_THAT(checked_ast->root_expr().call_expr().args(), SizeIs(2));
+  ASSERT_EQ(checked_ast->root_expr()
+                .call_expr()
+                .args()[0]
+                .select_expr()
+                .operand()
+                .ident_expr()
+                .name(),
+            "com.example.TestVariable1");
+  ASSERT_EQ(checked_ast->root_expr()
+                .call_expr()
+                .args()[1]
+                .select_expr()
+                .operand()
+                .ident_expr()
+                .name(),
+            "com.example.TestVariable2");
+}
+
+TEST(AliasTest, AliasToContainerResolvesMessage) {
+  google::protobuf::Arena arena;
+
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  ExpressionContainer container;
+  ASSERT_THAT(container.AddAlias("pb3", "cel.expr.conformance.proto3"), IsOk());
+
+  env.set_container(std::move(container));
+
+  google::protobuf::LinkMessageReflection<testpb3::TestAllTypes>();
+
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(auto ast,
+                       MakeTestParsedAst("pb3.TestAllTypes{single_int64: 10}"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  ASSERT_TRUE(result.IsValid()) << result.FormatError();
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> checked_ast, result.ReleaseAst());
+
+  EXPECT_THAT(
+      checked_ast->type_map(),
+      Contains(Pair(checked_ast->root_expr().id(),
+                    Eq(AstType(MessageTypeSpec(
+                        "cel.expr.conformance.proto3.TestAllTypes"))))));
+
+  EXPECT_THAT(
+      checked_ast->reference_map(),
+      Contains(Pair(checked_ast->root_expr().id(),
+                    Property(&Reference::name,
+                             "cel.expr.conformance.proto3.TestAllTypes"))));
+
+  EXPECT_EQ(checked_ast->root_expr().struct_expr().name(),
+            "cel.expr.conformance.proto3.TestAllTypes");
+}
+
+TEST(AliasTest, AliasSimpleName) {
+  google::protobuf::Arena arena;
+
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  ExpressionContainer container;
+  ASSERT_THAT(container.AddAlias("foo", "bar"), IsOk());
+
+  env.set_container(std::move(container));
+
+  google::protobuf::LinkMessageReflection<testpb3::TestAllTypes>();
+
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+  env.InsertOrReplaceVariable(MakeVariableDecl("bar", IntType()));
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("foo"));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  ASSERT_TRUE(result.IsValid()) << result.FormatError();
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> checked_ast, result.ReleaseAst());
+
+  EXPECT_EQ(checked_ast->root_expr().ident_expr().name(), "bar");
+}
+
+TEST(AliasTest, AliasPreventsContainerResolution) {
+  google::protobuf::Arena arena;
+
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  ASSERT_OK_AND_ASSIGN(ExpressionContainer container,
+                       MakeExpressionContainer("cel.expr"));
+  ASSERT_THAT(container.AddAlias("pb3", "cel.expr.conformance.proto3"), IsOk());
+  env.set_container(std::move(container));
+
+  ASSERT_TRUE(env.InsertVariableIfAbsent(
+      MakeVariableDecl("cel.expr.pb3.FooVariable", IntType())));
+
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  TypeCheckerImpl impl(std::move(env));
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("FooVariable"));
+    ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+    EXPECT_FALSE(result.IsValid());
+    EXPECT_THAT(
+        result.GetIssues(),
+        Contains(IsIssueWithSubstring(
+            Severity::kError, "undeclared reference to 'FooVariable'")));
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("pb3.FooVariable"));
+    ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+    EXPECT_FALSE(result.IsValid());
+    EXPECT_THAT(
+        result.GetIssues(),
+        Contains(IsIssueWithSubstring(
+            Severity::kError, "undeclared reference to 'pb3.FooVariable'")));
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("expr.pb3.FooVariable"));
+    ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+    ASSERT_TRUE(result.IsValid()) << result.FormatError();
+    ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> checked_ast, result.ReleaseAst());
+    EXPECT_EQ(checked_ast->root_expr().ident_expr().name(),
+              "cel.expr.pb3.FooVariable");
+  }
+}
+
+TEST(AliasTest, AliasPreventsDisambiguation) {
+  // Copying behavior from cel-go and cel-java.
+  google::protobuf::Arena arena;
+
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  ExpressionContainer container;
+  ASSERT_THAT(container.AddAlias("pb3", "cel.expr.conformance.proto3"), IsOk());
+  env.set_container(std::move(container));
+  env.InsertOrReplaceVariable(MakeVariableDecl("pb3.Foo", IntType()));
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  TypeCheckerImpl impl(std::move(env));
+
+  {
+    ASSERT_OK_AND_ASSIGN(
+        auto ast, MakeTestParsedAst("pb3.TestAllTypes{single_int64: 10}"));
+    ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+    ASSERT_TRUE(result.IsValid()) << result.FormatError();
+    ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> checked_ast, result.ReleaseAst());
+    EXPECT_EQ(checked_ast->root_expr().struct_expr().name(),
+              "cel.expr.conformance.proto3.TestAllTypes");
+  }
+  {
+    ASSERT_OK_AND_ASSIGN(
+        auto ast, MakeTestParsedAst(".pb3.TestAllTypes{single_int64: 10}"));
+    ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+    ASSERT_TRUE(result.IsValid()) << result.FormatError();
+    ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> checked_ast, result.ReleaseAst());
+    EXPECT_EQ(checked_ast->root_expr().struct_expr().name(),
+              "cel.expr.conformance.proto3.TestAllTypes");
+  }
+  {
+    ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst("pb3.Foo"));
+    ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+    ASSERT_FALSE(result.IsValid());
+    EXPECT_THAT(result.GetIssues(),
+                Contains(IsIssueWithSubstring(
+                    Severity::kError, "undeclared reference to 'pb3.Foo'")));
+  }
+  {
+    ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst(".pb3.Foo"));
+    ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+    ASSERT_FALSE(result.IsValid());
+    EXPECT_THAT(result.GetIssues(),
+                Contains(IsIssueWithSubstring(
+                    Severity::kError, "undeclared reference to '.pb3.Foo'")));
+  }
+}
+
 class GenericMessagesTest : public testing::TestWithParam<CheckedExprTestCase> {
 };
 
-TEST_P(GenericMessagesTest, TypeChecksProto3) {
+TEST_P(GenericMessagesTest, TypeChecksProto3Imports) {
   const CheckedExprTestCase& test_case = GetParam();
   google::protobuf::Arena arena;
 
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
-  env.set_container("cel.expr.conformance.proto3");
+  env.set_container(*MakeExpressionContainer(
+      "", "cel.expr.conformance.proto3.TestAllTypes",
+      "cel.expr.conformance.proto3.NestedTestAllTypes"));
   google::protobuf::LinkMessageReflection<testpb3::TestAllTypes>();
 
   ASSERT_TRUE(env.InsertVariableIfAbsent(MakeVariableDecl(
@@ -1714,11 +2092,40 @@ TEST_P(GenericMessagesTest, TypeChecksProto3) {
     return;
   }
 
-  ASSERT_TRUE(result.IsValid())
-      << absl::StrJoin(result.GetIssues(), "\n",
-                       [](std::string* out, const TypeCheckIssue& issue) {
-                         absl::StrAppend(out, issue.message());
-                       });
+  ASSERT_TRUE(result.IsValid()) << result.FormatError();
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> checked_ast, result.ReleaseAst());
+
+  EXPECT_THAT(checked_ast->type_map(),
+              Contains(Pair(checked_ast->root_expr().id(),
+                            Eq(test_case.expected_result_type))))
+      << cel::test::FormatBaselineAst(*checked_ast);
+}
+
+TEST_P(GenericMessagesTest, TypeChecksProto3Container) {
+  const CheckedExprTestCase& test_case = GetParam();
+  google::protobuf::Arena arena;
+
+  TypeCheckEnv env(GetSharedTestingDescriptorPool());
+  env.set_container(*MakeExpressionContainer("cel.expr.conformance.proto3"));
+  google::protobuf::LinkMessageReflection<testpb3::TestAllTypes>();
+
+  ASSERT_TRUE(env.InsertVariableIfAbsent(MakeVariableDecl(
+      "test_msg", MessageType(testpb3::TestAllTypes::descriptor()))));
+  ASSERT_THAT(RegisterMinimalBuiltins(&arena, env), IsOk());
+
+  TypeCheckerImpl impl(std::move(env));
+  ASSERT_OK_AND_ASSIGN(auto ast, MakeTestParsedAst(test_case.expr));
+  ASSERT_OK_AND_ASSIGN(ValidationResult result, impl.Check(std::move(ast)));
+
+  if (!test_case.error_substring.empty()) {
+    EXPECT_THAT(result.GetIssues(),
+                Contains(IsIssueWithSubstring(Severity::kError,
+                                              test_case.error_substring)));
+    return;
+  }
+
+  ASSERT_TRUE(result.IsValid()) << result.FormatError();
 
   ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> checked_ast, result.ReleaseAst());
 
@@ -1836,6 +2243,12 @@ INSTANTIATE_TEST_SUITE_P(
         },
         CheckedExprTestCase{
             .expr = "TestAllTypes{single_any: ['string']}",
+            .expected_result_type = AstType(
+                MessageTypeSpec("cel.expr.conformance.proto3.TestAllTypes")),
+        },
+        CheckedExprTestCase{
+            .expr = "TestAllTypes{repeated_nested_message: "
+                    "[TestAllTypes.NestedMessage{bb: 42}]}",
             .expected_result_type = AstType(
                 MessageTypeSpec("cel.expr.conformance.proto3.TestAllTypes")),
         },
@@ -2247,7 +2660,7 @@ TEST_P(StrictNullAssignmentTest, TypeChecksProto3) {
   google::protobuf::Arena arena;
 
   TypeCheckEnv env(GetSharedTestingDescriptorPool());
-  env.set_container("cel.expr.conformance.proto3");
+  env.set_container(*MakeExpressionContainer("cel.expr.conformance.proto3"));
   google::protobuf::LinkMessageReflection<testpb3::TestAllTypes>();
 
   ASSERT_TRUE(env.InsertVariableIfAbsent(MakeVariableDecl(

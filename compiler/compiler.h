@@ -19,6 +19,7 @@
 #include <string>
 #include <utility>
 
+#include "absl/base/nullability.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -29,6 +30,7 @@
 #include "parser/options.h"
 #include "parser/parser_interface.h"
 #include "validator/validator.h"
+#include "google/protobuf/arena.h"
 
 namespace cel {
 
@@ -95,12 +97,14 @@ struct CompilerLibrarySubset {
 struct CompilerOptions {
   ParserOptions parser_options;
   CheckerOptions checker_options;
+  // If true, parse errors will be adapted to issues where possible.
+  bool adapt_parser_errors = false;
 };
 
 // Interface for CEL CompilerBuilder objects.
 //
-// Builder implementations are thread hostile, but should create
-// thread-compatible Compiler instances.
+// Builder implementations do not provide any synchronization themselves,
+// but create thread-compatible Compiler instances.
 class CompilerBuilder {
  public:
   virtual ~CompilerBuilder() = default;
@@ -126,10 +130,16 @@ class Compiler {
   virtual ~Compiler() = default;
 
   virtual absl::StatusOr<ValidationResult> Compile(
-      absl::string_view source, absl::string_view description) const = 0;
+      absl::string_view source, absl::string_view description,
+      google::protobuf::Arena* absl_nullable arena) const = 0;
 
   absl::StatusOr<ValidationResult> Compile(absl::string_view source) const {
-    return Compile(source, "<input>");
+    return Compile(source, "<input>", nullptr);
+  }
+
+  absl::StatusOr<ValidationResult> Compile(
+      absl::string_view source, absl::string_view description) const {
+    return Compile(source, description, nullptr);
   }
 
   // Accessor for the underlying type checker.
@@ -140,6 +150,15 @@ class Compiler {
 
   // Accessor for the underlying validator.
   virtual const Validator& GetValidator() const = 0;
+
+  // Returns a builder initialized with the configuration of this compiler.
+  //
+  // The returned builder is a copy of the validated environment and may
+  // behave differently than the builder that created this compiler.
+  //
+  // The returned builder does not share state with the compiler and may be
+  // modified independently.
+  virtual std::unique_ptr<CompilerBuilder> ToBuilder() const = 0;
 };
 
 }  // namespace cel

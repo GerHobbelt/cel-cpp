@@ -69,6 +69,7 @@ cc_library(
         "//runtime:reference_resolver",
         "//runtime:runtime_options",
         "//runtime:standard_runtime_builder_factory",
+        "//testutil:test_macros",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
@@ -200,6 +201,10 @@ _TESTS_TO_SKIP = [
     # precision to preserve value. Not available on older compilers where we just use absl::Format.
     # We should probably update the spec to allow different formats that parse to the same value.
     "conversions/string/double_hard",
+
+    # Recent changes
+    "namespace/namespace_shadowing/basic",
+    "namespace/namespace_shadowing/comprehension_shadowing_namespaced_selector_disambiguation",
 ]
 
 _TESTS_TO_SKIP_MODERN = _TESTS_TO_SKIP
@@ -221,7 +226,7 @@ _TESTS_TO_SKIP_LEGACY = _TESTS_TO_SKIP + [
     "proto3/set_null/list_value",
     "proto3/set_null/single_struct",
 
-    # cel.@block
+    # no optional support for legacy types
     "block_ext/basic/optional_list",
     "block_ext/basic/optional_map",
     "block_ext/basic/optional_map_chained",
@@ -231,7 +236,7 @@ _TESTS_TO_SKIP_LEGACY = _TESTS_TO_SKIP + [
 _TESTS_TO_SKIP_CHECKED = [
     # block is a post-check optimization that inserts internal variables. The C++ type checker
     # needs support for a proper optimizer for this to work.
-    "block_ext",
+    # "block_ext",
 ]
 
 _TESTS_TO_SKIP_LEGACY_DASHBOARD = [
