@@ -64,9 +64,8 @@ class ValueStep : public ExpressionStepLogic, public DirectExpressionStep {
         value_(std::move(value)),
         attr_() {}
 
-  absl::Status Evaluate(ExecutionFrame* frame) const override {
+  void Evaluate(ExecutionFrame* frame) const override {
     frame->value_stack().Push(value_, attr_);
-    return absl::OkStatus();
   }
 
   absl::Status Evaluate(ExecutionFrameBase& frame, Value& result,
@@ -229,7 +228,7 @@ Value MakeValue(InputType type, google::protobuf::Arena* absl_nonnull arena) {
     }
     case InputType::kError:
     default:
-      return ErrorValue(absl::InternalError("error"));
+      return ErrorValue::From(absl::InternalError("error"), arena);
   }
 }
 

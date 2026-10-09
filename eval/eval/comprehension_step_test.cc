@@ -81,9 +81,8 @@ class GetListKeysResultStep : public ExpressionStepBase {
  public:
   GetListKeysResultStep() : ExpressionStepBase() {}
 
-  absl::Status Evaluate(ExecutionFrame* frame) const override {
+  void Evaluate(ExecutionFrame* frame) const override {
     frame->value_stack().Pop(1);
-    return absl::OkStatus();
   }
 };
 
@@ -95,7 +94,7 @@ MATCHER_P(CelStringValue, val, "") {
 
 TEST_F(ListKeysStepTest, MapPartiallyUnknown) {
   ExecutionPath path;
-  path.push_back(ExpressionStep::MakeGenericStep(CreateIdentStep("var")));
+  path.push_back(ExpressionStep::MakeIdentifierStep("var"));
   auto init_step =
       std::make_unique<ComprehensionInitStep>(/*iter_slot=*/0, /*accu_slot=*/0);
   init_step->set_error_jump_offset(1);
@@ -133,7 +132,7 @@ TEST_F(ListKeysStepTest, MapPartiallyUnknown) {
 
 TEST_F(ListKeysStepTest, ErrorPassedThrough) {
   ExecutionPath path;
-  path.push_back(ExpressionStep::MakeGenericStep(CreateIdentStep("var")));
+  path.push_back(ExpressionStep::MakeIdentifierStep("var"));
   auto init_step =
       std::make_unique<ComprehensionInitStep>(/*iter_slot=*/0, /*accu_slot=*/0);
   init_step->set_error_jump_offset(1);
@@ -158,7 +157,7 @@ TEST_F(ListKeysStepTest, ErrorPassedThrough) {
 
 TEST_F(ListKeysStepTest, UnknownSetPassedThrough) {
   ExecutionPath path;
-  path.push_back(ExpressionStep::MakeGenericStep(CreateIdentStep("var")));
+  path.push_back(ExpressionStep::MakeIdentifierStep("var"));
   auto init_step =
       std::make_unique<ComprehensionInitStep>(/*iter_slot=*/0, /*accu_slot=*/0);
   init_step->set_error_jump_offset(1);

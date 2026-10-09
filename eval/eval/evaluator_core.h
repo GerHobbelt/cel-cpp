@@ -19,9 +19,11 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/base/attributes.h"
 #include "absl/base/nullability.h"
 #include "absl/base/optimization.h"
 #include "absl/log/absl_check.h"
@@ -33,17 +35,23 @@
 #include "base/type_provider.h"
 #include "common/native_type.h"
 #include "common/value.h"
+#include "common/value_kind.h"
+#include "common/values/list_value_builder.h"
 #include "eval/eval/attribute_utility.h"
 #include "eval/eval/comprehension_slots.h"
 #include "eval/eval/comprehension_step.h"
 #include "eval/eval/direct_expression_step.h"
+#include "eval/eval/equality_steps.h"
 #include "eval/eval/evaluator_stack.h"
 #include "eval/eval/expression_step_logic.h"
+#include "eval/eval/function_step.h"
+#include "eval/eval/ident_step.h"
 #include "eval/eval/iterator_stack.h"
 #include "eval/eval/lazy_init_step.h"
 #include "eval/eval/logic_step.h"
 #include "runtime/activation_interface.h"
 #include "runtime/internal/activation_attribute_matcher_access.h"
+#include "runtime/internal/errors.h"
 #include "runtime/runtime.h"
 #include "runtime/runtime_options.h"
 #include "google/protobuf/arena.h"
@@ -71,35 +79,41 @@ enum class ExpressionStepKind : uint16_t {
   kUintConstant = 6,
   // Any constant that can't be inlined.
   kOtherConstant = 7,
+  // Lazy subexpressions.
   kLazyInit = 8,
   kAssignSlotAndPop = 9,
   kClearSlots = 10,
+  // Core boolean logic.
   kBooleanNot = 11,
   kNotStrictlyFalse = 12,
   kBooleanOr = 13,
   kBooleanAnd = 14,
   // Comprehension steps.
-  // Init step doesn't fit inline and is slow anyway, so just use a generic
-  // step.
+  // Init step doesn't fit inline and is slow anyway, so it uses a generic step.
   kComprehensionFinish = 15,
   kComprehensionNext = 16,
   kComprehensionCond = 17,
   kComprehensionNext2 = 18,
   kComprehensionCond2 = 19,
   kReadSlot = 20,
-  // Jumps steps.
+  // Jump steps.
   kBooleanOrJump = 21,
   kBooleanAndJump = 22,
   kTernaryJump = 23,
   kFixedJump = 24,
+  // Identifier
+  kIdentifier = 25,
+  // Functions calls.
+  kEagerFunction = 26,
+  kLazyFunction = 27,
   // fast built-ins. These are used if we know they haven't been extended.
   // otherwise we use normal function call steps.
-  kFastIn = 25,
-  kFastEqual = 26,
-  kFastNotEqual = 27,
+  kFastIn = 28,
+  kFastEqual = 29,
+  kFastNotEqual = 30,
   // Special built-in steps for mutable lists implementing map/filter.
-  kNewMutableList = 28,
-  kMutableListAppend = 29,
+  kNewMutableList = 31,
+  kMutableListAppend = 32,
 };
 
 struct BoolJumpStepInfo {
@@ -143,7 +157,9 @@ class ExpressionStep {
   // Returns if the execution step comes from AST.
   bool comes_from_ast() const { return header_.id >= 0; }
 
-  void Evaluate(ExecutionFrame* context) const;
+  // Evaluates this step on the given execution frame.
+  ABSL_ATTRIBUTE_ALWAYS_INLINE inline void Evaluate(
+      ExecutionFrame& frame) const;
 
   const ExpressionStepLogic* GetGenericStep() const;
   bool IsGenericStep() const;
@@ -276,6 +292,18 @@ class ExpressionStep {
     return step;
   }
 
+  static ExpressionStep MakeIdentifierStep(absl::string_view identifier,
+                                           int64_t id = -1) {
+    ExpressionStep step(ExpressionStepKind::kIdentifier, id);
+    step.u_.identifier = new std::string(identifier);
+    return step;
+  }
+
+  static ExpressionStep MakeIdentStep(absl::string_view identifier,
+                                      int64_t id = -1) {
+    return MakeIdentifierStep(identifier, id);
+  }
+
   static ExpressionStep MakeFastInStep(int64_t id = -1) {
     return ExpressionStep(ExpressionStepKind::kFastIn, id);
   }
@@ -296,7 +324,29 @@ class ExpressionStep {
     return ExpressionStep(ExpressionStepKind::kMutableListAppend, id);
   }
 
+  static ExpressionStep MakeEagerFunctionStep(
+      std::unique_ptr<EagerFunctionStep> step_impl, int64_t id = -1) {
+    ExpressionStep step(ExpressionStepKind::kEagerFunction, id);
+    step.u_.eager_function_step = step_impl.release();
+    return step;
+  }
+
+  static ExpressionStep MakeLazyFunctionStep(
+      std::unique_ptr<LazyFunctionStep> step_impl, int64_t id = -1) {
+    ExpressionStep step(ExpressionStepKind::kLazyFunction, id);
+    step.u_.lazy_function_step = step_impl.release();
+    return step;
+  }
+
  private:
+  static ABSL_ATTRIBUTE_ALWAYS_INLINE inline void EvaluateReadSlotStep(
+      size_t slot_index, ExecutionFrame& frame);
+  static ABSL_ATTRIBUTE_ALWAYS_INLINE inline void EvaluateBoolJumpStep(
+      const BoolJumpStepInfo& step, bool target, ExecutionFrame& frame);
+  static ABSL_ATTRIBUTE_ALWAYS_INLINE inline void EvaluateTernaryJumpStep(
+      const TernaryJumpStepInfo& step, ExecutionFrame& frame);
+  static void EvaluateMutableListAppendStep(ExecutionFrame& frame);
+
   struct Header {
     ExpressionStepKind kind;
     uint16_t reserved;
@@ -355,6 +405,9 @@ class ExpressionStep {
     BoolJumpStepInfo bool_jump_step;
     TernaryJumpStepInfo ternary_jump_step;
     FixedJumpStepInfo fixed_jump_step;
+    EagerFunctionStep* eager_function_step;
+    LazyFunctionStep* lazy_function_step;
+    std::string* identifier;
 
     Data() : empty(nullptr) {}
     ~Data() {}
@@ -377,7 +430,7 @@ class WrappedDirectStep : public ExpressionStepLogic {
                              int64_t expr_id = -1)
       : impl_(std::move(impl)) {}
 
-  absl::Status Evaluate(ExecutionFrame* frame) const override;
+  void Evaluate(ExecutionFrame* frame) const override;
 
   cel::NativeTypeId GetNativeTypeId() const override {
     return cel::NativeTypeId::For<WrappedDirectStep>();
@@ -665,7 +718,14 @@ class ExecutionFrame : public ExecutionFrameBase {
   }
 
   // Returns next expression to evaluate.
-  const ExpressionStep* Next();
+  ABSL_ATTRIBUTE_ALWAYS_INLINE const ExpressionStep* Next() {
+    if (ABSL_PREDICT_TRUE(pc_ < execution_path_.size())) {
+      const ExpressionStep* step = &execution_path_[pc_++];
+      ABSL_ASSUME(step != nullptr);
+      return step;
+    }
+    return NextSlow();
+  }
 
   // Evaluate the execution frame to completion.
   absl::StatusOr<cel::Value> Evaluate(EvaluationListener& listener);
@@ -676,31 +736,14 @@ class ExecutionFrame : public ExecutionFrameBase {
   //
   // Offset applies after normal pc increment. For example, JumpTo(0) is a
   // no-op, JumpTo(1) skips the expected next step.
-  absl::Status JumpTo(int offset) {
+  ABSL_ATTRIBUTE_ALWAYS_INLINE void JumpToOrAbort(int offset) {
     ABSL_DCHECK_LE(offset, static_cast<int>(execution_path_.size()));
     ABSL_DCHECK_GE(offset, -static_cast<int>(pc_));
 
     int new_pc = static_cast<int>(pc_) + offset;
-    if (new_pc < 0 || new_pc > static_cast<int>(execution_path_.size())) {
-      return absl::Status(absl::StatusCode::kInternal,
-                          absl::StrCat("Jump address out of range: position: ",
-                                       pc_, ", offset: ", offset,
-                                       ", range: ", execution_path_.size()));
-    }
-    pc_ = static_cast<size_t>(new_pc);
-    return absl::OkStatus();
-  }
-
-  void JumpToOrAbort(int offset) {
-    ABSL_DCHECK_LE(offset, static_cast<int>(execution_path_.size()));
-    ABSL_DCHECK_GE(offset, -static_cast<int>(pc_));
-
-    int new_pc = static_cast<int>(pc_) + offset;
-    if (new_pc < 0 || new_pc > static_cast<int>(execution_path_.size())) {
-      Abort(absl::Status(absl::StatusCode::kInternal,
-                         absl::StrCat("Jump address out of range: position: ",
-                                      pc_, ", offset: ", offset,
-                                      ", range: ", execution_path_.size())));
+    if (ABSL_PREDICT_FALSE(new_pc < 0 ||
+                           new_pc > static_cast<int>(execution_path_.size()))) {
+      AbortJumpOutOfRange(offset);
       return;
     }
     pc_ = static_cast<size_t>(new_pc);
@@ -775,6 +818,21 @@ class ExecutionFrame : public ExecutionFrameBase {
     ExecutionPathView return_expression;
     size_t expected_stack_size;
   };
+
+  // Runs steps until the program completes or is aborted.
+  void Interpret();
+
+  // Same as Interpret(), but also calls `listener` with the result of each
+  // step that maps to an AST node.
+  void InterpretWithCallback(EvaluationListener& listener);
+
+  // Slow path of Next(): returns from a completed subexpression, or returns
+  // nullptr at the end of the program.
+  ABSL_ATTRIBUTE_NOINLINE const ExpressionStep* NextSlow();
+
+  // Error path of JumpToOrAbort().
+  ABSL_ATTRIBUTE_NOINLINE ABSL_ATTRIBUTE_COLD void AbortJumpOutOfRange(
+      int offset);
 
   size_t pc_;  // pc_ - Program Counter. Current position on execution path.
   ExecutionPathView execution_path_;
@@ -908,6 +966,15 @@ inline ExpressionStep::~ExpressionStep() {
     case ExpressionStepKind::kOtherConstant:
       delete u_.other_val;
       break;
+    case ExpressionStepKind::kIdentifier:
+      delete u_.identifier;
+      break;
+    case ExpressionStepKind::kEagerFunction:
+      delete u_.eager_function_step;
+      break;
+    case ExpressionStepKind::kLazyFunction:
+      delete u_.lazy_function_step;
+      break;
     case ExpressionStepKind::kMovedFrom:
     case ExpressionStepKind::kIntConstant:
     case ExpressionStepKind::kBoolConstant:
@@ -965,6 +1032,176 @@ inline ExpressionStep& ExpressionStep::operator=(ExpressionStep&& other) {
   swap(*this, tmp);
   swap(other, *this);
   return *this;
+}
+
+inline void ExpressionStep::EvaluateReadSlotStep(size_t slot_index,
+                                                 ExecutionFrame& frame) {
+  const ComprehensionSlots::Slot* slot =
+      frame.comprehension_slots().Get(slot_index);
+  if (!slot->Has()) {
+    frame.Abort(absl::InternalError(absl::StrCat(
+        "Comprehension variable read out of scope: ", slot_index)));
+    return;
+  }
+  frame.value_stack().Push(slot->value(), slot->attribute());
+}
+
+inline void ExpressionStep::EvaluateBoolJumpStep(const BoolJumpStepInfo& step,
+                                                 bool target,
+                                                 ExecutionFrame& frame) {
+  ABSL_DCHECK(step.set) << "BoolJumpStep did not have a value set.";
+  if (!frame.value_stack().HasEnough(step.arg_count)) {
+    frame.Abort(
+        absl::Status(absl::StatusCode::kInternal, "Value stack underflow"));
+    return;
+  }
+  const cel::Value& value = frame.value_stack().Peek();
+  if (value.IsBool() && value.GetBool().NativeValue() == target) {
+    frame.value_stack().SwapAndPop(step.arg_count, step.arg_count - 1);
+    frame.JumpToOrAbort(step.offset);
+  }
+  // No-op if the value is not a bool or the value is not the target.
+  // Cleanup will happen if we hit a later jump or we fall-through.
+}
+
+inline void ExpressionStep::EvaluateTernaryJumpStep(
+    const TernaryJumpStepInfo& step, ExecutionFrame& frame) {
+  ABSL_DCHECK(step.set) << "TernaryJumpStep did not have a value set.";
+  if (!frame.value_stack().HasEnough(1)) {
+    frame.Abort(absl::InternalError("TernaryJumpStep: value stack underflow"));
+    return;
+  }
+  const cel::Value& condition = frame.value_stack().Peek();
+  switch (condition.kind()) {
+    case cel::ValueKind::kBool:
+      if (!condition.GetBool().NativeValue()) {
+        frame.JumpToOrAbort(step.jump_to_second_offset);
+      }
+      frame.value_stack().Pop();
+      break;
+    default:
+      frame.value_stack().PopAndPush(cel::ErrorValue::From(
+          cel::runtime_internal::CreateNoMatchingOverloadError(
+              "<ternary_condition>"),
+          frame.arena()));
+      ABSL_FALLTHROUGH_INTENDED;
+    case cel::ValueKind::kError:
+    case cel::ValueKind::kUnknown:
+      // Propagate the error or unknown set.
+      frame.JumpToOrAbort(step.error_offset);
+      break;
+  }
+}
+
+inline void ExpressionStep::Evaluate(ExecutionFrame& frame) const {
+  switch (header_.kind) {
+    case ExpressionStepKind::kGenericLogic:
+      u_.logic->Evaluate(&frame);
+      break;
+    case ExpressionStepKind::kIntConstant:
+      frame.value_stack().Push(cel::IntValue(u_.int_val));
+      break;
+    case ExpressionStepKind::kBoolConstant:
+      frame.value_stack().Push(cel::BoolValue(u_.bool_val));
+      break;
+    case ExpressionStepKind::kDoubleConstant:
+      frame.value_stack().Push(cel::DoubleValue(u_.double_val));
+      break;
+    case ExpressionStepKind::kNullConstant:
+      frame.value_stack().Push(cel::NullValue());
+      break;
+    case ExpressionStepKind::kUintConstant:
+      frame.value_stack().Push(cel::UintValue(u_.uint_val));
+      break;
+    case ExpressionStepKind::kOtherConstant:
+      frame.value_stack().Push(*u_.other_val);
+      break;
+    case ExpressionStepKind::kLazyInit:
+      EvaluateLazyInitStep(u_.lazy_init, frame);
+      break;
+    case ExpressionStepKind::kAssignSlotAndPop:
+      EvaluateAssignSlotAndPop(u_.slot_index, frame);
+      break;
+    case ExpressionStepKind::kClearSlots:
+      EvaluateClearSlotStep(u_.clear_slots, frame);
+      break;
+    case ExpressionStepKind::kBooleanNot:
+      EvaluateNotStep(frame);
+      break;
+    case ExpressionStepKind::kNotStrictlyFalse:
+      EvaluateNotStrictlyFalseStep(frame);
+      break;
+    case ExpressionStepKind::kBooleanOr:
+      EvaluateBoolLogicStep(BoolLogicKind::kOr, u_.arg_count, frame);
+      break;
+    case ExpressionStepKind::kBooleanAnd:
+      EvaluateBoolLogicStep(BoolLogicKind::kAnd, u_.arg_count, frame);
+      break;
+    case ExpressionStepKind::kComprehensionFinish:
+      EvaluateComprehensionFinishStep(u_.slot_index, frame);
+      break;
+    case ExpressionStepKind::kComprehensionNext:
+      u_.next_step.Evaluate1(&frame);
+      break;
+    case ExpressionStepKind::kComprehensionNext2:
+      u_.next_step.Evaluate2(&frame);
+      break;
+    case ExpressionStepKind::kComprehensionCond:
+      u_.cond_step.Evaluate1(&frame);
+      break;
+    case ExpressionStepKind::kComprehensionCond2:
+      u_.cond_step.Evaluate2(&frame);
+      break;
+    case ExpressionStepKind::kReadSlot:
+      EvaluateReadSlotStep(u_.slot_index, frame);
+      break;
+    case ExpressionStepKind::kBooleanOrJump:
+      EvaluateBoolJumpStep(u_.bool_jump_step, true, frame);
+      break;
+    case ExpressionStepKind::kBooleanAndJump:
+      EvaluateBoolJumpStep(u_.bool_jump_step, false, frame);
+      break;
+    case ExpressionStepKind::kTernaryJump:
+      EvaluateTernaryJumpStep(u_.ternary_jump_step, frame);
+      break;
+    case ExpressionStepKind::kFixedJump:
+      ABSL_DCHECK(u_.fixed_jump_step.set)
+          << "FixedJumpStep did not have a value set.";
+      frame.JumpToOrAbort(u_.fixed_jump_step.offset);
+      break;
+    case ExpressionStepKind::kIdentifier:
+      EvaluateIdentifierStep(*u_.identifier, frame);
+      break;
+    case ExpressionStepKind::kEagerFunction:
+      u_.eager_function_step->Evaluate(frame);
+      break;
+    case ExpressionStepKind::kLazyFunction:
+      u_.lazy_function_step->Evaluate(frame);
+      break;
+    case ExpressionStepKind::kFastIn:
+      EvaluateFastInStep(frame);
+      break;
+    case ExpressionStepKind::kFastEqual:
+      EvaluateFastEqualStep(/*negation=*/false, frame);
+      break;
+    case ExpressionStepKind::kFastNotEqual:
+      EvaluateFastEqualStep(/*negation=*/true, frame);
+      break;
+    case ExpressionStepKind::kNewMutableList:
+      frame.value_stack().Push(cel::CustomListValue(
+          cel::common_internal::NewMutableListValue(frame.arena()),
+          frame.arena()));
+      break;
+    case ExpressionStepKind::kMutableListAppend:
+      EvaluateMutableListAppendStep(frame);
+      break;
+    case ExpressionStepKind::kMovedFrom:
+      frame.Abort(absl::InternalError(
+          "ExpressionStep::Evaluate called on moved-from step"));
+      break;
+    default:
+      ABSL_UNREACHABLE();
+  }
 }
 
 }  // namespace google::api::expr::runtime

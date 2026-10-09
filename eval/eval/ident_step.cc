@@ -16,7 +16,6 @@
 #include "eval/eval/comprehension_slots.h"
 #include "eval/eval/direct_expression_step.h"
 #include "eval/eval/evaluator_core.h"
-#include "eval/eval/expression_step_base.h"
 #include "eval/eval/expression_step_logic.h"
 #include "eval/internal/errors.h"
 #include "internal/status_macros.h"
@@ -28,16 +27,6 @@ namespace {
 using ::cel::Value;
 using ::cel::runtime_internal::CreateError;
 
-class IdentStep : public ExpressionStepBase {
- public:
-  explicit IdentStep(absl::string_view name) : name_(name) {}
-
-  absl::Status Evaluate(ExecutionFrame* frame) const override;
-
- private:
-  std::string name_;
-};
-
 absl::Status LookupIdent(absl::string_view name, ExecutionFrameBase& frame,
                          Value& result, AttributeTrail& attribute) {
   if (frame.attribute_tracking_enabled()) {
@@ -46,7 +35,7 @@ absl::Status LookupIdent(absl::string_view name, ExecutionFrameBase& frame,
         frame.attribute_utility().CheckForMissingAttribute(attribute)) {
       CEL_ASSIGN_OR_RETURN(
           result, frame.attribute_utility().CreateMissingAttributeError(
-                      attribute.attribute()));
+                      attribute.attribute(), frame.arena()));
       return absl::OkStatus();
     }
     if (frame.unknown_processing_enabled() &&
@@ -70,17 +59,6 @@ absl::Status LookupIdent(absl::string_view name, ExecutionFrameBase& frame,
       CreateError(absl::StrCat("No value with name \"", name,
                                "\" found in Activation")),
       frame.arena());
-
-  return absl::OkStatus();
-}
-
-absl::Status IdentStep::Evaluate(ExecutionFrame* frame) const {
-  Value value;
-  AttributeTrail attribute;
-
-  CEL_RETURN_IF_ERROR(LookupIdent(name_, *frame, value, attribute));
-
-  frame->value_stack().Push(std::move(value), std::move(attribute));
 
   return absl::OkStatus();
 }
@@ -135,6 +113,18 @@ class DirectSlotStep : public DirectExpressionStep {
 
 }  // namespace
 
+void EvaluateIdentifierStep(absl::string_view identifier,
+                            ExecutionFrame& frame) {
+  frame.value_stack().Push(cel::NullValue());
+  if (absl::Status status =
+          LookupIdent(identifier, frame, frame.value_stack().Peek(),
+                      frame.value_stack().PeekAttribute());
+      !status.ok()) {
+    frame.Abort(std::move(status));
+    return;
+  }
+}
+
 std::unique_ptr<DirectExpressionStep> CreateDirectIdentStep(
     absl::string_view identifier, int64_t expr_id) {
   return std::make_unique<DirectIdentStep>(identifier, expr_id);
@@ -143,11 +133,6 @@ std::unique_ptr<DirectExpressionStep> CreateDirectIdentStep(
 std::unique_ptr<DirectExpressionStep> CreateDirectSlotIdentStep(
     absl::string_view identifier, size_t slot_index, int64_t expr_id) {
   return std::make_unique<DirectSlotStep>(identifier, slot_index, expr_id);
-}
-
-std::unique_ptr<ExpressionStepLogic> CreateIdentStep(
-    const absl::string_view name) {
-  return std::make_unique<IdentStep>(name);
 }
 
 }  // namespace google::api::expr::runtime

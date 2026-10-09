@@ -234,14 +234,13 @@ absl::StatusOr<ExpressionStep> MakeTestFunctionStep(
       call.function(), call.has_target(), argument_matcher);
   int id = GetExprId();
   if (!lazy_overloads.empty()) {
-    ABSL_ASSIGN_OR_RETURN(auto logic,
-                          CreateFunctionStep(call, id, lazy_overloads));
-    return ExpressionStep::MakeGenericStep(std::move(logic), id);
+    return ExpressionStep::MakeLazyFunctionStep(
+        CreateLazyFunctionStep(call, id, std::move(lazy_overloads)), id);
   }
   auto overloads = registry.FindStaticOverloads(
       call.function(), call.has_target(), argument_matcher);
-  ABSL_ASSIGN_OR_RETURN(auto logic, CreateFunctionStep(call, id, overloads));
-  return ExpressionStep::MakeGenericStep(std::move(logic), id);
+  return ExpressionStep::MakeEagerFunctionStep(
+      CreateFunctionStep(call, id, std::move(overloads)), id);
 }
 
 // Test common functions with varying levels of unknown support.
@@ -402,17 +401,13 @@ TEST_P(FunctionStepTest, TestNoMatchingOverloadsUnexpectedArgCount) {
   ASSERT_OK_AND_ASSIGN(auto step1, MakeTestFunctionStep(call1, registry));
   ASSERT_OK_AND_ASSIGN(auto step2, MakeTestFunctionStep(call1, registry));
 
-  ASSERT_OK_AND_ASSIGN(
-      auto step3_logic,
-      CreateFunctionStep(add_call, -1,
-                         registry.FindStaticOverloads(
-                             add_call.function(), false,
-                             {cel::Kind::kInt64, cel::Kind::kInt64})));
-
   path.push_back(std::move(step0));
   path.push_back(std::move(step1));
   path.push_back(std::move(step2));
-  path.push_back(ExpressionStep::MakeGenericStep(std::move(step3_logic)));
+  path.push_back(ExpressionStep::MakeEagerFunctionStep(CreateFunctionStep(
+      add_call, -1,
+      registry.FindStaticOverloads(add_call.function(), false,
+                                   {cel::Kind::kInt64, cel::Kind::kInt64}))));
 
   std::unique_ptr<CelExpressionFlatImpl> impl = GetExpression(std::move(path));
 
@@ -679,8 +674,7 @@ TEST_P(FunctionStepTestUnknowns, PartialUnknownHandlingTest) {
   IdentExpr ident1;
   ident1.set_name("param");
   CallExpr call1 = SinkFunction::MakeCall();
-  auto step0 =
-      ExpressionStep::MakeGenericStep(CreateIdentStep("param"), GetExprId());
+  auto step0 = ExpressionStep::MakeIdentifierStep("param", GetExprId());
   ASSERT_OK_AND_ASSIGN(auto step1, MakeTestFunctionStep(call1, registry));
 
   path.push_back(std::move(step0));

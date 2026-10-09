@@ -65,9 +65,9 @@ class LogicStepTest : public testing::TestWithParam<bool> {
                              CelValue* result, bool enable_unknown) {
     ExecutionPath path;
 
-    path.push_back(ExpressionStep::MakeGenericStep(CreateIdentStep("name0")));
-    path.push_back(ExpressionStep::MakeGenericStep(CreateIdentStep("name1")));
-    path.push_back(ExpressionStep::MakeGenericStep(CreateIdentStep("name2")));
+    path.push_back(ExpressionStep::MakeIdentifierStep("name0"));
+    path.push_back(ExpressionStep::MakeIdentifierStep("name1"));
+    path.push_back(ExpressionStep::MakeIdentifierStep("name2"));
     path.push_back(ExpressionStep::MakeGenericStep(CreateTernaryStep(), 4));
 
     cel::RuntimeOptions options;
@@ -259,7 +259,8 @@ TEST_P(TernaryStepDirectTest, ForwardError) {
                            cel::internal::GetTestingDescriptorPool(),
                            cel::internal::GetTestingMessageFactory(), &arena_);
 
-  cel::Value error_value = cel::ErrorValue(absl::InternalError("test error"));
+  cel::Value error_value =
+      cel::ErrorValue::From(absl::InternalError("test error"), &arena_);
 
   std::unique_ptr<DirectExpressionStep> step = CreateDirectTernaryStep(
       CreateConstValueDirectStep(error_value, -1),

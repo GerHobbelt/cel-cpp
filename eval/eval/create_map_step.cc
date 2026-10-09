@@ -57,7 +57,7 @@ class CreateStructStepForMap final : public ExpressionStepBase {
       : entry_count_(entry_count),
         optional_indices_(std::move(optional_indices)) {}
 
-  absl::Status Evaluate(ExecutionFrame* frame) const override;
+  void Evaluate(ExecutionFrame* frame) const override;
 
  private:
   absl::StatusOr<Value> DoEvaluate(ExecutionFrame* frame) const;
@@ -90,7 +90,8 @@ absl::StatusOr<Value> CreateStructStepForMap::DoEvaluate(
 
   for (size_t i = 0; i < entry_count_; i += 1) {
     const auto& map_key = args[2 * i];
-    CEL_RETURN_IF_ERROR(cel::CheckMapKey(map_key)).With(ErrorValueReturn());
+    CEL_RETURN_IF_ERROR(cel::CheckMapKey(map_key))
+        .With(ErrorValueReturn(frame->arena()));
     const auto& map_value = args[(2 * i) + 1];
     if (optional_indices_.contains(static_cast<int32_t>(i))) {
       if (auto optional_map_value = map_value.AsOptional();
@@ -108,7 +109,7 @@ absl::StatusOr<Value> CreateStructStepForMap::DoEvaluate(
             builder->Put(map_key, std::move(optional_map_value_value)));
       } else {
         return cel::TypeConversionError(map_value.DebugString(),
-                                        "optional_type");
+                                        "optional_type", frame->arena());
       }
     } else {
       CEL_RETURN_IF_ERROR(builder->Put(map_key, map_value));
@@ -118,16 +119,20 @@ absl::StatusOr<Value> CreateStructStepForMap::DoEvaluate(
   return std::move(*builder).Build();
 }
 
-absl::Status CreateStructStepForMap::Evaluate(ExecutionFrame* frame) const {
+void CreateStructStepForMap::Evaluate(ExecutionFrame* frame) const {
   if (frame->value_stack().size() < 2 * entry_count_) {
-    return absl::InternalError("CreateStructStepForMap: stack underflow");
+    frame->Abort(
+        absl::InternalError("CreateStructStepForMap: stack underflow"));
+    return;
   }
 
-  CEL_ASSIGN_OR_RETURN(auto result, DoEvaluate(frame));
+  absl::StatusOr<Value> result = DoEvaluate(frame);
+  if (!result.ok()) {
+    frame->Abort(std::move(result).status());
+    return;
+  }
 
-  frame->value_stack().PopAndPush(2 * entry_count_, std::move(result));
-
-  return absl::OkStatus();
+  frame->value_stack().PopAndPush(2 * entry_count_, *std::move(result));
 }
 
 class DirectCreateMapStep : public DirectExpressionStep {
@@ -178,7 +183,8 @@ absl::Status DirectCreateMapStep::Evaluate(
       }
     }
 
-    CEL_RETURN_IF_ERROR(cel::CheckMapKey(key)).With(ErrorValueAssign(result));
+    CEL_RETURN_IF_ERROR(cel::CheckMapKey(key))
+        .With(ErrorValueAssign(result, frame.arena()));
 
     CEL_RETURN_IF_ERROR(
         deps_[map_value_index]->Evaluate(frame, value, tmp_attr));
@@ -218,7 +224,8 @@ absl::Status DirectCreateMapStep::Evaluate(
             builder->Put(std::move(key), std::move(optional_map_value_value)));
         continue;
       }
-      result = cel::TypeConversionError(value.DebugString(), "optional_type");
+      result = cel::TypeConversionError(value.DebugString(), "optional_type",
+                                        frame.arena());
       return absl::OkStatus();
     }
 
@@ -238,10 +245,9 @@ class MutableMapStep final : public ExpressionStepBase {
  public:
   MutableMapStep() = default;
 
-  absl::Status Evaluate(ExecutionFrame* frame) const override {
+  void Evaluate(ExecutionFrame* frame) const override {
     frame->value_stack().Push(cel::CustomMapValue(
         NewMutableMapValue(frame->arena()), frame->arena()));
-    return absl::OkStatus();
   }
 };
 

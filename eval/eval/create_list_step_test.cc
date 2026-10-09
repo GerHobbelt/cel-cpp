@@ -119,7 +119,7 @@ absl::StatusOr<CelValue> RunExpressionWithCelValues(
     expr0.set_id(ind);
     expr0.mutable_ident_expr().set_name(var_name);
 
-    path.push_back(ExpressionStep::MakeGenericStep(CreateIdentStep(var_name)));
+    path.push_back(ExpressionStep::MakeIdentifierStep(var_name));
     activation.InsertValue(var_name, value);
   }
 
@@ -307,9 +307,9 @@ TEST(CreateDirectListStep, ForwardFirstError) {
 
   std::vector<std::unique_ptr<DirectExpressionStep>> deps;
   deps.push_back(CreateConstValueDirectStep(
-      cel::ErrorValue(absl::InternalError("test1")), -1));
+      cel::ErrorValue::From(absl::InternalError("test1"), &arena), -1));
   deps.push_back(CreateConstValueDirectStep(
-      cel::ErrorValue(absl::InternalError("test2")), -1));
+      cel::ErrorValue::From(absl::InternalError("test2"), &arena), -1));
   auto step = CreateDirectListStep(std::move(deps), {}, -1);
 
   cel::Value result;
@@ -387,9 +387,9 @@ TEST(CreateDirectListStep, ErrorBeforeUnknown) {
 
   std::vector<std::unique_ptr<DirectExpressionStep>> deps;
   deps.push_back(CreateConstValueDirectStep(
-      cel::ErrorValue(absl::InternalError("test1")), -1));
+      cel::ErrorValue::From(absl::InternalError("test1"), &arena), -1));
   deps.push_back(CreateConstValueDirectStep(
-      cel::ErrorValue(absl::InternalError("test2")), -1));
+      cel::ErrorValue::From(absl::InternalError("test2"), &arena), -1));
   auto step = CreateDirectListStep(std::move(deps), {}, -1);
 
   cel::Value result;
