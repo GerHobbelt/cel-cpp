@@ -104,14 +104,16 @@ class SelectStepTest : public testing::Test {
 
     auto& ident = expr0.mutable_ident_expr();
     ident.set_name("target");
-    CEL_ASSIGN_OR_RETURN(auto step0, CreateIdentStep(ident.name(), expr0.id()));
+    auto step0 = CreateIdentStep(ident.name());
     CEL_ASSIGN_OR_RETURN(
         auto step1,
-        CreateSelectStep(cel::StringValue(select.field()), select.test_only(),
-                         expr.id(), options.enable_wrapper_type_null_unboxing));
+        CreateSelectStep(select.field(), select.test_only(),
+                         options.enable_wrapper_type_null_unboxing));
 
-    path.push_back(std::move(step0));
-    path.push_back(std::move(step1));
+    path.push_back(
+        ExpressionStep::MakeGenericStep(std::move(step0), expr0.id()));
+    path.push_back(
+        ExpressionStep::MakeGenericStep(std::move(step1), expr.id()));
 
     cel::RuntimeOptions runtime_options;
     if (options.enable_unknowns) {
@@ -286,23 +288,21 @@ TEST_F(SelectStepTest, MapPresenseIsErrorTest) {
   Expr& expr0 = select_map.mutable_operand();
   auto& ident = expr0.mutable_ident_expr();
   ident.set_name("target");
-
-  ASSERT_OK_AND_ASSIGN(auto step0, CreateIdentStep(ident.name(), expr0.id()));
+  auto step0 = CreateIdentStep(ident.name());
   ASSERT_OK_AND_ASSIGN(
       auto step1,
-      CreateSelectStep(cel::StringValue(select_map.field()),
-                       select_map.test_only(), expr1.id(),
+      CreateSelectStep(select_map.field(), select_map.test_only(),
                        /*enable_wrapper_type_null_unboxing=*/false));
   ASSERT_OK_AND_ASSIGN(
       auto step2,
-      CreateSelectStep(cel::StringValue(select.field()), select.test_only(),
-                       select_expr.id(),
+      CreateSelectStep(select.field(), select.test_only(),
                        /*enable_wrapper_type_null_unboxing=*/false));
 
   ExecutionPath path;
-  path.push_back(std::move(step0));
-  path.push_back(std::move(step1));
-  path.push_back(std::move(step2));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step0), expr0.id()));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step1), expr1.id()));
+  path.push_back(
+      ExpressionStep::MakeGenericStep(std::move(step2), select_expr.id()));
   CelExpressionFlatImpl cel_expr(
       env_, FlatExpression(std::move(path), /*comprehension_slot_count=*/0,
                            env_->type_registry.GetComposedTypeProvider(),
@@ -749,15 +749,15 @@ TEST_P(SelectStepConformanceTest, CelErrorAsArgument) {
 
   auto& ident = expr0.mutable_ident_expr();
   ident.set_name("message");
-  ASSERT_OK_AND_ASSIGN(auto step0, CreateIdentStep(ident.name(), expr0.id()));
+  auto step0 = CreateIdentStep(ident.name());
   ASSERT_OK_AND_ASSIGN(
       auto step1,
-      CreateSelectStep(cel::StringValue(select.field()), select.test_only(),
-                       dummy_expr.id(),
+      CreateSelectStep(select.field(), select.test_only(),
                        /*enable_wrapper_type_null_unboxing=*/false));
 
-  path.push_back(std::move(step0));
-  path.push_back(std::move(step1));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step0), expr0.id()));
+  path.push_back(
+      ExpressionStep::MakeGenericStep(std::move(step1), dummy_expr.id()));
 
   CelError error = absl::CancelledError();
 
@@ -791,15 +791,15 @@ TEST_F(SelectStepTest, DisableMissingAttributeOK) {
 
   auto& ident = expr0.mutable_ident_expr();
   ident.set_name("message");
-  ASSERT_OK_AND_ASSIGN(auto step0, CreateIdentStep(ident.name(), expr0.id()));
+  auto step0 = CreateIdentStep(ident.name());
   ASSERT_OK_AND_ASSIGN(
       auto step1,
-      CreateSelectStep(cel::StringValue(select.field()), select.test_only(),
-                       dummy_expr.id(),
+      CreateSelectStep(select.field(), select.test_only(),
                        /*enable_wrapper_type_null_unboxing=*/false));
 
-  path.push_back(std::move(step0));
-  path.push_back(std::move(step1));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step0), expr0.id()));
+  path.push_back(
+      ExpressionStep::MakeGenericStep(std::move(step1), dummy_expr.id()));
 
   CelExpressionFlatImpl cel_expr(
       env_, FlatExpression(std::move(path), /*comprehension_slot_count=*/0,
@@ -834,15 +834,15 @@ TEST_F(SelectStepTest, UnrecoverableUnknownValueProducesError) {
 
   auto& ident = expr0.mutable_ident_expr();
   ident.set_name("message");
-  ASSERT_OK_AND_ASSIGN(auto step0, CreateIdentStep(ident.name(), expr0.id()));
+  auto step0 = CreateIdentStep(ident.name());
   ASSERT_OK_AND_ASSIGN(
       auto step1,
-      CreateSelectStep(cel::StringValue(select.field()), select.test_only(),
-                       dummy_expr.id(),
+      CreateSelectStep(select.field(), select.test_only(),
                        /*enable_wrapper_type_null_unboxing=*/false));
 
-  path.push_back(std::move(step0));
-  path.push_back(std::move(step1));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step0), expr0.id()));
+  path.push_back(
+      ExpressionStep::MakeGenericStep(std::move(step1), dummy_expr.id()));
 
   cel::RuntimeOptions options;
   options.enable_missing_attribute_errors = true;
@@ -883,16 +883,16 @@ TEST_F(SelectStepTest, UnknownPatternResolvesToUnknown) {
 
   auto& ident = expr0.mutable_ident_expr();
   ident.set_name("message");
-  auto step0_status = CreateIdentStep(ident.name(), expr0.id());
-  auto step1_status = CreateSelectStep(
-      cel::StringValue(select.field()), select.test_only(), dummy_expr.id(),
-      /*enable_wrapper_type_null_unboxing=*/false);
+  auto step0 = CreateIdentStep(ident.name());
+  auto step1_status =
+      CreateSelectStep(select.field(), select.test_only(),
+                       /*enable_wrapper_type_null_unboxing=*/false);
 
-  ASSERT_THAT(step0_status, IsOk());
   ASSERT_THAT(step1_status, IsOk());
 
-  path.push_back(*std::move(step0_status));
-  path.push_back(*std::move(step1_status));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step0), expr0.id()));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(*step1_status),
+                                                 dummy_expr.id()));
 
   cel::RuntimeOptions options;
   options.unknown_processing = cel::UnknownProcessingOptions::kAttributeOnly;
@@ -977,7 +977,7 @@ TEST_F(SelectStepTest, UnknownPatternResolvesToUnknown) {
 }
 
 TEST_P(SelectStepConformanceTest, TypedSelectStepTest) {
-  ASSERT_OK_AND_ASSIGN(auto step0, CreateIdentStep("message", -1));
+  auto step0 = CreateIdentStep("message");
 
   cel::StructType resolved_operand_type(
       (cel::MessageType(TestAllTypes::descriptor())));
@@ -987,16 +987,15 @@ TEST_P(SelectStepConformanceTest, TypedSelectStepTest) {
   cel::StructTypeField resolved_field((cel::MessageTypeField(field_desc)));
 
   ASSERT_OK_AND_ASSIGN(
-      auto step1,
-      CreateTypedSelectStep(cel::StringValue("single_int64"),
-                            resolved_operand_type, resolved_field,
-                            /*test_only=*/false, -1,
-                            /*enable_wrapper_type_null_unboxing=*/false,
-                            /*enable_optional_types=*/false));
+      auto step1, CreateTypedSelectStep(
+                      "single_int64", resolved_operand_type, resolved_field,
+                      /*test_only=*/false,
+                      /*enable_wrapper_type_null_unboxing=*/false,
+                      /*enable_optional_types=*/false));
 
   ExecutionPath path;
-  path.push_back(std::move(step0));
-  path.push_back(std::move(step1));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step0)));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step1)));
   cel::RuntimeOptions options;
   if (GetParam()) {
     options.unknown_processing = cel::UnknownProcessingOptions::kAttributeOnly;
@@ -1018,7 +1017,7 @@ TEST_P(SelectStepConformanceTest, TypedSelectStepTest) {
 }
 
 TEST_P(SelectStepConformanceTest, TypedSelectStepPropagatesUnknown) {
-  ASSERT_OK_AND_ASSIGN(auto step0, CreateIdentStep("message", -1));
+  auto step0 = CreateIdentStep("message");
 
   cel::StructType resolved_operand_type(
       (cel::MessageType(TestAllTypes::descriptor())));
@@ -1028,16 +1027,15 @@ TEST_P(SelectStepConformanceTest, TypedSelectStepPropagatesUnknown) {
   cel::StructTypeField resolved_field((cel::MessageTypeField(field_desc)));
 
   ASSERT_OK_AND_ASSIGN(
-      auto step1,
-      CreateTypedSelectStep(cel::StringValue("single_int64"),
-                            resolved_operand_type, resolved_field,
-                            /*test_only=*/false, -1,
-                            /*enable_wrapper_type_null_unboxing=*/false,
-                            /*enable_optional_types=*/false));
+      auto step1, CreateTypedSelectStep(
+                      "single_int64", resolved_operand_type, resolved_field,
+                      /*test_only=*/false,
+                      /*enable_wrapper_type_null_unboxing=*/false,
+                      /*enable_optional_types=*/false));
 
   ExecutionPath path;
-  path.push_back(std::move(step0));
-  path.push_back(std::move(step1));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step0)));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step1)));
   cel::RuntimeOptions options;
   if (GetParam()) {
     options.unknown_processing = cel::UnknownProcessingOptions::kAttributeOnly;
@@ -1056,7 +1054,7 @@ TEST_P(SelectStepConformanceTest, TypedSelectStepPropagatesUnknown) {
 }
 
 TEST_F(SelectStepTest, TypedSelectStepUnknownPatternResolvesToUnknown) {
-  ASSERT_OK_AND_ASSIGN(auto step0, CreateIdentStep("message", -1));
+  auto step0 = CreateIdentStep("message");
 
   cel::StructType resolved_operand_type(
       (cel::MessageType(TestAllTypes::descriptor())));
@@ -1066,16 +1064,15 @@ TEST_F(SelectStepTest, TypedSelectStepUnknownPatternResolvesToUnknown) {
   cel::StructTypeField resolved_field((cel::MessageTypeField(field_desc)));
 
   ASSERT_OK_AND_ASSIGN(
-      auto step1,
-      CreateTypedSelectStep(cel::StringValue("single_int64"),
-                            resolved_operand_type, resolved_field,
-                            /*test_only=*/false, -1,
-                            /*enable_wrapper_type_null_unboxing=*/false,
-                            /*enable_optional_types=*/false));
+      auto step1, CreateTypedSelectStep(
+                      "single_int64", resolved_operand_type, resolved_field,
+                      /*test_only=*/false,
+                      /*enable_wrapper_type_null_unboxing=*/false,
+                      /*enable_optional_types=*/false));
 
   ExecutionPath path;
-  path.push_back(std::move(step0));
-  path.push_back(std::move(step1));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step0)));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step1)));
   cel::RuntimeOptions options;
   options.unknown_processing = cel::UnknownProcessingOptions::kAttributeOnly;
   CelExpressionFlatImpl cel_expr(
@@ -1133,14 +1130,18 @@ TEST_F(DirectSelectStepTest, SelectFromMap) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step = CreateDirectSelectStep(
-      CreateDirectIdentStep("map_val", -1), cel::StringValue("one"),
-      /*test_only=*/false, -1,
-      /*enable_wrapper_type_null_unboxing=*/true);
+  auto step =
+      CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1), "one",
+                             /*test_only=*/false, -1,
+                             /*enable_wrapper_type_null_unboxing=*/true);
 
   auto map_builder = cel::NewMapValueBuilder(&arena_);
-  ASSERT_THAT(map_builder->Put(cel::StringValue("one"), IntValue(1)), IsOk());
-  ASSERT_THAT(map_builder->Put(cel::StringValue("two"), IntValue(2)), IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("one"), IntValue(1)),
+      IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("two"), IntValue(2)),
+      IsOk());
   activation.InsertOrAssignValue("map_val", std::move(*map_builder).Build());
 
   ExecutionFrameBase frame(activation, options, type_provider_,
@@ -1160,14 +1161,18 @@ TEST_F(DirectSelectStepTest, HasMap) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step = CreateDirectSelectStep(
-      CreateDirectIdentStep("map_val", -1), cel::StringValue("two"),
-      /*test_only=*/true, -1,
-      /*enable_wrapper_type_null_unboxing=*/true);
+  auto step =
+      CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1), "two",
+                             /*test_only=*/true, -1,
+                             /*enable_wrapper_type_null_unboxing=*/true);
 
   auto map_builder = cel::NewMapValueBuilder(&arena_);
-  ASSERT_THAT(map_builder->Put(cel::StringValue("one"), IntValue(1)), IsOk());
-  ASSERT_THAT(map_builder->Put(cel::StringValue("two"), IntValue(2)), IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("one"), IntValue(1)),
+      IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("two"), IntValue(2)),
+      IsOk());
   activation.InsertOrAssignValue("map_val", std::move(*map_builder).Build());
 
   ExecutionFrameBase frame(activation, options, type_provider_,
@@ -1187,15 +1192,19 @@ TEST_F(DirectSelectStepTest, SelectFromOptionalMap) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step = CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1),
-                                     cel::StringValue("one"),
-                                     /*test_only=*/false, -1,
-                                     /*enable_wrapper_type_null_unboxing=*/true,
-                                     /*enable_optional_types=*/true);
+  auto step =
+      CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1), "one",
+                             /*test_only=*/false, -1,
+                             /*enable_wrapper_type_null_unboxing=*/true,
+                             /*enable_optional_types=*/true);
 
   auto map_builder = cel::NewMapValueBuilder(&arena_);
-  ASSERT_THAT(map_builder->Put(cel::StringValue("one"), IntValue(1)), IsOk());
-  ASSERT_THAT(map_builder->Put(cel::StringValue("two"), IntValue(2)), IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("one"), IntValue(1)),
+      IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("two"), IntValue(2)),
+      IsOk());
   activation.InsertOrAssignValue(
       "map_val", OptionalValue::Of(std::move(*map_builder).Build(), &arena_));
 
@@ -1216,15 +1225,19 @@ TEST_F(DirectSelectStepTest, SelectFromOptionalMapAbsent) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step = CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1),
-                                     cel::StringValue("three"),
-                                     /*test_only=*/false, -1,
-                                     /*enable_wrapper_type_null_unboxing=*/true,
-                                     /*enable_optional_types=*/true);
+  auto step =
+      CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1), "three",
+                             /*test_only=*/false, -1,
+                             /*enable_wrapper_type_null_unboxing=*/true,
+                             /*enable_optional_types=*/true);
 
   auto map_builder = cel::NewMapValueBuilder(&arena_);
-  ASSERT_THAT(map_builder->Put(cel::StringValue("one"), IntValue(1)), IsOk());
-  ASSERT_THAT(map_builder->Put(cel::StringValue("two"), IntValue(2)), IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("one"), IntValue(1)),
+      IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("two"), IntValue(2)),
+      IsOk());
   activation.InsertOrAssignValue(
       "map_val", OptionalValue::Of(std::move(*map_builder).Build(), &arena_));
 
@@ -1246,7 +1259,7 @@ TEST_F(DirectSelectStepTest, SelectFromOptionalStruct) {
   RuntimeOptions options;
 
   auto step = CreateDirectSelectStep(CreateDirectIdentStep("struct_val", -1),
-                                     cel::StringValue("single_int64"),
+                                     "single_int64",
                                      /*test_only=*/false, -1,
                                      /*enable_wrapper_type_null_unboxing=*/true,
                                      /*enable_optional_types=*/true);
@@ -1281,7 +1294,7 @@ TEST_F(DirectSelectStepTest, SelectFromOptionalStructFieldNotSet) {
   RuntimeOptions options;
 
   auto step = CreateDirectSelectStep(CreateDirectIdentStep("struct_val", -1),
-                                     cel::StringValue("single_string"),
+                                     "single_string",
                                      /*test_only=*/false, -1,
                                      /*enable_wrapper_type_null_unboxing=*/true,
                                      /*enable_optional_types=*/true);
@@ -1315,11 +1328,11 @@ TEST_F(DirectSelectStepTest, SelectFromEmptyOptional) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step = CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1),
-                                     cel::StringValue("one"),
-                                     /*test_only=*/false, -1,
-                                     /*enable_wrapper_type_null_unboxing=*/true,
-                                     /*enable_optional_types=*/true);
+  auto step =
+      CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1), "one",
+                             /*test_only=*/false, -1,
+                             /*enable_wrapper_type_null_unboxing=*/true,
+                             /*enable_optional_types=*/true);
 
   activation.InsertOrAssignValue("map_val", OptionalValue::None());
 
@@ -1340,15 +1353,19 @@ TEST_F(DirectSelectStepTest, HasOptional) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step = CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1),
-                                     cel::StringValue("two"),
-                                     /*test_only=*/true, -1,
-                                     /*enable_wrapper_type_null_unboxing=*/true,
-                                     /*enable_optional_types=*/true);
+  auto step =
+      CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1), "two",
+                             /*test_only=*/true, -1,
+                             /*enable_wrapper_type_null_unboxing=*/true,
+                             /*enable_optional_types=*/true);
 
   auto map_builder = cel::NewMapValueBuilder(&arena_);
-  ASSERT_THAT(map_builder->Put(cel::StringValue("one"), IntValue(1)), IsOk());
-  ASSERT_THAT(map_builder->Put(cel::StringValue("two"), IntValue(2)), IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("one"), IntValue(1)),
+      IsOk());
+  ASSERT_THAT(
+      map_builder->Put(cel::StringValue::WrapUnsafe("two"), IntValue(2)),
+      IsOk());
   activation.InsertOrAssignValue(
       "map_val", OptionalValue::Of(std::move(*map_builder).Build(), &arena_));
 
@@ -1369,11 +1386,11 @@ TEST_F(DirectSelectStepTest, HasEmptyOptional) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step = CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1),
-                                     cel::StringValue("two"),
-                                     /*test_only=*/true, -1,
-                                     /*enable_wrapper_type_null_unboxing=*/true,
-                                     /*enable_optional_types=*/true);
+  auto step =
+      CreateDirectSelectStep(CreateDirectIdentStep("map_val", -1), "two",
+                             /*test_only=*/true, -1,
+                             /*enable_wrapper_type_null_unboxing=*/true,
+                             /*enable_optional_types=*/true);
 
   activation.InsertOrAssignValue("map_val", OptionalValue::None());
 
@@ -1394,11 +1411,10 @@ TEST_F(DirectSelectStepTest, SelectFromStruct) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step =
-      CreateDirectSelectStep(CreateDirectIdentStep("test_all_types", -1),
-                             cel::StringValue("single_int64"),
-                             /*test_only=*/false, -1,
-                             /*enable_wrapper_type_null_unboxing=*/true);
+  auto step = CreateDirectSelectStep(
+      CreateDirectIdentStep("test_all_types", -1), "single_int64",
+      /*test_only=*/false, -1,
+      /*enable_wrapper_type_null_unboxing=*/true);
 
   TestAllTypes message;
   message.set_single_int64(1);
@@ -1421,11 +1437,10 @@ TEST_F(DirectSelectStepTest, HasStruct) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step =
-      CreateDirectSelectStep(CreateDirectIdentStep("test_all_types", -1),
-                             cel::StringValue("single_string"),
-                             /*test_only=*/true, -1,
-                             /*enable_wrapper_type_null_unboxing=*/true);
+  auto step = CreateDirectSelectStep(
+      CreateDirectIdentStep("test_all_types", -1), "single_string",
+      /*test_only=*/true, -1,
+      /*enable_wrapper_type_null_unboxing=*/true);
 
   TestAllTypes message;
   message.set_single_int64(1);
@@ -1449,10 +1464,10 @@ TEST_F(DirectSelectStepTest, SelectFromUnsupportedType) {
   cel::Activation activation;
   RuntimeOptions options;
 
-  auto step = CreateDirectSelectStep(
-      CreateDirectIdentStep("bool_val", -1), cel::StringValue("one"),
-      /*test_only=*/false, -1,
-      /*enable_wrapper_type_null_unboxing=*/true);
+  auto step =
+      CreateDirectSelectStep(CreateDirectIdentStep("bool_val", -1), "one",
+                             /*test_only=*/false, -1,
+                             /*enable_wrapper_type_null_unboxing=*/true);
 
   activation.InsertOrAssignValue("bool_val", BoolValue(false));
 
@@ -1476,11 +1491,10 @@ TEST_F(DirectSelectStepTest, AttributeUpdatedIfRequested) {
   RuntimeOptions options;
   options.unknown_processing = cel::UnknownProcessingOptions::kAttributeOnly;
 
-  auto step =
-      CreateDirectSelectStep(CreateDirectIdentStep("test_all_types", -1),
-                             cel::StringValue("single_int64"),
-                             /*test_only=*/false, -1,
-                             /*enable_wrapper_type_null_unboxing=*/true);
+  auto step = CreateDirectSelectStep(
+      CreateDirectIdentStep("test_all_types", -1), "single_int64",
+      /*test_only=*/false, -1,
+      /*enable_wrapper_type_null_unboxing=*/true);
 
   TestAllTypes message;
   message.set_single_int64(1);
@@ -1506,11 +1520,10 @@ TEST_F(DirectSelectStepTest, MissingAttributesToErrors) {
   RuntimeOptions options;
   options.enable_missing_attribute_errors = true;
 
-  auto step =
-      CreateDirectSelectStep(CreateDirectIdentStep("test_all_types", -1),
-                             cel::StringValue("single_int64"),
-                             /*test_only=*/false, -1,
-                             /*enable_wrapper_type_null_unboxing=*/true);
+  auto step = CreateDirectSelectStep(
+      CreateDirectIdentStep("test_all_types", -1), "single_int64",
+      /*test_only=*/false, -1,
+      /*enable_wrapper_type_null_unboxing=*/true);
 
   TestAllTypes message;
   message.set_single_int64(1);
@@ -1538,11 +1551,10 @@ TEST_F(DirectSelectStepTest, IdentifiesUnknowns) {
   RuntimeOptions options;
   options.unknown_processing = cel::UnknownProcessingOptions::kAttributeOnly;
 
-  auto step =
-      CreateDirectSelectStep(CreateDirectIdentStep("test_all_types", -1),
-                             cel::StringValue("single_int64"),
-                             /*test_only=*/false, -1,
-                             /*enable_wrapper_type_null_unboxing=*/true);
+  auto step = CreateDirectSelectStep(
+      CreateDirectIdentStep("test_all_types", -1), "single_int64",
+      /*test_only=*/false, -1,
+      /*enable_wrapper_type_null_unboxing=*/true);
 
   TestAllTypes message;
   message.set_single_int64(1);
@@ -1573,7 +1585,7 @@ TEST_F(DirectSelectStepTest, ForwardErrorValue) {
   auto step = CreateDirectSelectStep(
       CreateConstValueDirectStep(cel::ErrorValue(absl::InternalError("test1")),
                                  -1),
-      cel::StringValue("single_int64"),
+      "single_int64",
       /*test_only=*/false, -1,
       /*enable_wrapper_type_null_unboxing=*/true);
 
@@ -1600,7 +1612,7 @@ TEST_F(DirectSelectStepTest, ForwardUnknownOperand) {
       CreateConstValueDirectStep(cel::common_internal::MakeUnknownValue(
                                      cel::Unknown(std::move(attr_set))),
                                  -1),
-      cel::StringValue("single_int64"),
+      "single_int64",
       /*test_only=*/false, -1,
       /*enable_wrapper_type_null_unboxing=*/true);
 

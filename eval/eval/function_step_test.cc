@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -216,7 +217,8 @@ std::unique_ptr<CelExpressionFlatImpl> CreateExpressionImpl(
     const cel::RuntimeOptions& options,
     std::unique_ptr<DirectExpressionStep> expr) {
   ExecutionPath path;
-  path.push_back(std::make_unique<WrappedDirectStep>(std::move(expr), -1));
+  path.push_back(ExpressionStep::MakeGenericStep(
+      std::make_unique<WrappedDirectStep>(std::move(expr))));
 
   auto env = NewTestingRuntimeEnv();
   return std::make_unique<CelExpressionFlatImpl>(
@@ -225,17 +227,21 @@ std::unique_ptr<CelExpressionFlatImpl> CreateExpressionImpl(
                      env->type_registry.GetComposedTypeProvider(), options));
 }
 
-absl::StatusOr<std::unique_ptr<ExpressionStep>> MakeTestFunctionStep(
+absl::StatusOr<ExpressionStep> MakeTestFunctionStep(
     const CallExpr& call, const CelFunctionRegistry& registry) {
   auto argument_matcher = ArgumentMatcher(call);
   auto lazy_overloads = registry.ModernFindLazyOverloads(
       call.function(), call.has_target(), argument_matcher);
+  int id = GetExprId();
   if (!lazy_overloads.empty()) {
-    return CreateFunctionStep(call, GetExprId(), lazy_overloads);
+    ABSL_ASSIGN_OR_RETURN(auto logic,
+                          CreateFunctionStep(call, id, lazy_overloads));
+    return ExpressionStep::MakeGenericStep(std::move(logic), id);
   }
   auto overloads = registry.FindStaticOverloads(
       call.function(), call.has_target(), argument_matcher);
-  return CreateFunctionStep(call, GetExprId(), overloads);
+  ABSL_ASSIGN_OR_RETURN(auto logic, CreateFunctionStep(call, id, overloads));
+  return ExpressionStep::MakeGenericStep(std::move(logic), id);
 }
 
 // Test common functions with varying levels of unknown support.
@@ -397,7 +403,7 @@ TEST_P(FunctionStepTest, TestNoMatchingOverloadsUnexpectedArgCount) {
   ASSERT_OK_AND_ASSIGN(auto step2, MakeTestFunctionStep(call1, registry));
 
   ASSERT_OK_AND_ASSIGN(
-      auto step3,
+      auto step3_logic,
       CreateFunctionStep(add_call, -1,
                          registry.FindStaticOverloads(
                              add_call.function(), false,
@@ -406,7 +412,7 @@ TEST_P(FunctionStepTest, TestNoMatchingOverloadsUnexpectedArgCount) {
   path.push_back(std::move(step0));
   path.push_back(std::move(step1));
   path.push_back(std::move(step2));
-  path.push_back(std::move(step3));
+  path.push_back(ExpressionStep::MakeGenericStep(std::move(step3_logic)));
 
   std::unique_ptr<CelExpressionFlatImpl> impl = GetExpression(std::move(path));
 
@@ -535,13 +541,11 @@ TEST_P(FunctionStepTest, LazyFunctionOverloadingTest) {
   lt_call.mutable_args().emplace_back();
   lt_call.set_function("_<_");
 
-  ASSERT_OK_AND_ASSIGN(
-      auto step0,
-      CreateConstValueStep(cel::interop_internal::CreateIntValue(20), -1));
+  auto step0 =
+      ExpressionStep::MakeConstant(cel::interop_internal::CreateIntValue(20));
   ASSERT_OK_AND_ASSIGN(auto step1, MakeTestFunctionStep(call1, registry));
-  ASSERT_OK_AND_ASSIGN(
-      auto step2,
-      CreateConstValueStep(cel::interop_internal::CreateDoubleValue(21.9), -1));
+  auto step2 = ExpressionStep::MakeConstant(
+      cel::interop_internal::CreateDoubleValue(21.9));
   ASSERT_OK_AND_ASSIGN(auto step3, MakeTestFunctionStep(call2, registry));
   ASSERT_OK_AND_ASSIGN(auto step4, MakeTestFunctionStep(lt_call, registry));
 
@@ -675,8 +679,8 @@ TEST_P(FunctionStepTestUnknowns, PartialUnknownHandlingTest) {
   IdentExpr ident1;
   ident1.set_name("param");
   CallExpr call1 = SinkFunction::MakeCall();
-
-  ASSERT_OK_AND_ASSIGN(auto step0, CreateIdentStep("param", GetExprId()));
+  auto step0 =
+      ExpressionStep::MakeGenericStep(CreateIdentStep("param"), GetExprId());
   ASSERT_OK_AND_ASSIGN(auto step1, MakeTestFunctionStep(call1, registry));
 
   path.push_back(std::move(step0));
@@ -987,17 +991,17 @@ TEST(FunctionStepStrictnessTest,
      IfFunctionStrictAndGivenUnknownSkipsInvocation) {
   UnknownSet unknown_set;
   CelFunctionRegistry registry;
-  ASSERT_OK(registry.Register(std::make_unique<ConstFunction>(
-      CelValue::CreateUnknownSet(&unknown_set), "ConstUnknown")));
-  ASSERT_OK(registry.Register(std::make_unique<SinkFunction>(
-      CelValue::Type::kUnknownSet, /*is_strict=*/true)));
+  ASSERT_THAT(registry.Register(std::make_unique<ConstFunction>(
+                  CelValue::CreateUnknownSet(&unknown_set), "ConstUnknown")),
+              IsOk());
+  ASSERT_THAT(registry.Register(std::make_unique<SinkFunction>(
+                  CelValue::Type::kUnknownSet, /*is_strict=*/true)),
+              IsOk());
   ExecutionPath path;
   CallExpr call0 = ConstFunction::MakeCall("ConstUnknown");
   CallExpr call1 = SinkFunction::MakeCall();
-  ASSERT_OK_AND_ASSIGN(std::unique_ptr<ExpressionStep> step0,
-                       MakeTestFunctionStep(call0, registry));
-  ASSERT_OK_AND_ASSIGN(std::unique_ptr<ExpressionStep> step1,
-                       MakeTestFunctionStep(call1, registry));
+  ASSERT_OK_AND_ASSIGN(auto step0, MakeTestFunctionStep(call0, registry));
+  ASSERT_OK_AND_ASSIGN(auto step1, MakeTestFunctionStep(call1, registry));
   path.push_back(std::move(step0));
   path.push_back(std::move(step1));
   cel::RuntimeOptions options;
@@ -1018,17 +1022,17 @@ TEST(FunctionStepStrictnessTest,
 TEST(FunctionStepStrictnessTest, IfFunctionNonStrictAndGivenUnknownInvokesIt) {
   UnknownSet unknown_set;
   CelFunctionRegistry registry;
-  ASSERT_OK(registry.Register(std::make_unique<ConstFunction>(
-      CelValue::CreateUnknownSet(&unknown_set), "ConstUnknown")));
-  ASSERT_OK(registry.Register(std::make_unique<SinkFunction>(
-      CelValue::Type::kUnknownSet, /*is_strict=*/false)));
+  ASSERT_THAT(registry.Register(std::make_unique<ConstFunction>(
+                  CelValue::CreateUnknownSet(&unknown_set), "ConstUnknown")),
+              IsOk());
+  ASSERT_THAT(registry.Register(std::make_unique<SinkFunction>(
+                  CelValue::Type::kUnknownSet, /*is_strict=*/false)),
+              IsOk());
   ExecutionPath path;
   CallExpr call0 = ConstFunction::MakeCall("ConstUnknown");
   CallExpr call1 = SinkFunction::MakeCall();
-  ASSERT_OK_AND_ASSIGN(std::unique_ptr<ExpressionStep> step0,
-                       MakeTestFunctionStep(call0, registry));
-  ASSERT_OK_AND_ASSIGN(std::unique_ptr<ExpressionStep> step1,
-                       MakeTestFunctionStep(call1, registry));
+  ASSERT_OK_AND_ASSIGN(auto step0, MakeTestFunctionStep(call0, registry));
+  ASSERT_OK_AND_ASSIGN(auto step1, MakeTestFunctionStep(call1, registry));
   path.push_back(std::move(step0));
   path.push_back(std::move(step1));
   Expr placeholder_expr;
@@ -1186,7 +1190,7 @@ TEST_F(DirectFunctionStepTest, NoOverload) {
 
   std::vector<std::unique_ptr<DirectExpressionStep>> deps;
   deps.push_back(CreateConstValueDirectStep(cel::IntValue(1)));
-  deps.push_back(CreateConstValueDirectStep(cel::StringValue("2")));
+  deps.push_back(CreateConstValueDirectStep(cel::StringValue::WrapUnsafe("2")));
 
   auto expr = CreateDirectFunctionStep(-1, call, std::move(deps),
                                        GetOverloads(cel::builtin::kAdd, 2));

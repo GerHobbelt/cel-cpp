@@ -36,18 +36,24 @@ cc_library(
     name = "evaluator_core",
     srcs = [
         "evaluator_core.cc",
+        "lazy_init_step.cc",
     ],
     hdrs = [
         "evaluator_core.h",
+        "lazy_init_step.h",
     ],
     deps = [
+        ":attribute_trail",
         ":attribute_utility",
         ":comprehension_slots",
+        ":direct_expression_step",
         ":evaluator_stack",
         ":iterator_stack",
         "//base:data",
         "//common:native_type",
         "//common:value",
+        "//common:value_kind",
+        "//internal:status_macros",
         "//runtime",
         "//runtime:activation_interface",
         "//runtime:runtime_options",
@@ -60,6 +66,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
+        "@com_google_cel_spec//proto/cel/expr:value_cc_proto",
         "@com_google_protobuf//:protobuf",
     ],
 )
@@ -182,7 +189,6 @@ cc_library(
     deps = [
         ":compiler_constant_step",
         ":direct_expression_step",
-        ":evaluator_core",
         "//common:value",
         "@com_google_absl//absl/status:statusor",
     ],
@@ -732,6 +738,7 @@ cc_test(
         "//runtime:standard_functions",
         "//runtime/internal:runtime_env_testing",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -1137,7 +1144,6 @@ cc_library(
         ":attribute_trail",
         ":direct_expression_step",
         ":evaluator_core",
-        ":expression_step_base",
         "//common:native_type",
         "//common:value",
         "@com_google_absl//absl/status",
@@ -1148,7 +1154,9 @@ cc_test(
     name = "compiler_constant_step_test",
     srcs = ["compiler_constant_step_test.cc"],
     deps = [
+        ":attribute_trail",
         ":compiler_constant_step",
+        ":direct_expression_step",
         ":evaluator_core",
         "//common:native_type",
         "//common:value",
@@ -1162,31 +1170,12 @@ cc_test(
     ],
 )
 
-cc_library(
-    name = "lazy_init_step",
-    srcs = ["lazy_init_step.cc"],
-    hdrs = ["lazy_init_step.h"],
-    deps = [
-        ":attribute_trail",
-        ":comprehension_slots",
-        ":direct_expression_step",
-        ":evaluator_core",
-        ":expression_step_base",
-        "//common:value",
-        "//internal:status_macros",
-        "@com_google_absl//absl/base:nullability",
-        "@com_google_absl//absl/status",
-        "@com_google_cel_spec//proto/cel/expr:value_cc_proto",
-    ],
-)
-
 cc_test(
     name = "lazy_init_step_test",
     srcs = ["lazy_init_step_test.cc"],
     deps = [
-        ":const_value_step",
+        ":comprehension_slots",
         ":evaluator_core",
-        ":lazy_init_step",
         "//base:data",
         "//common:value",
         "//internal:testing",
@@ -1205,10 +1194,8 @@ cc_library(
     hdrs = ["direct_expression_step.h"],
     deps = [
         ":attribute_trail",
-        ":evaluator_core",
         "//common:native_type",
         "//common:value",
-        "//internal:status_macros",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:optional",
     ],
