@@ -143,7 +143,6 @@ cc_test(
         "//internal:testing_descriptor_pool",
         "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/types:optional",
     ],
 )
 
@@ -464,15 +463,6 @@ cc_test(
 )
 
 cc_library(
-    name = "casting",
-    hdrs = ["casting.h"],
-    deps = [
-        "//common/internal:casting",
-        "@com_google_absl//absl/base:core_headers",
-    ],
-)
-
-cc_library(
     name = "json",
     hdrs = ["json.h"],
 )
@@ -757,7 +747,6 @@ cc_library(
         ":allocator",
         ":any",
         ":arena",
-        ":casting",
         ":kind",
         ":memory",
         ":native_type",
@@ -833,7 +822,6 @@ cc_test(
         "value_test.cc",
     ],
     deps = [
-        ":casting",
         ":memory",
         ":native_type",
         ":type",
@@ -895,17 +883,10 @@ cc_library(
 )
 
 cc_library(
-    name = "reference_count",
-    hdrs = ["reference_count.h"],
-    deps = ["//common/internal:reference_count"],
-)
-
-cc_library(
     name = "allocator",
     hdrs = ["allocator.h"],
     deps = [
         ":arena",
-        ":data",
         "//internal:new",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:nullability",
@@ -923,29 +904,6 @@ cc_test(
         ":allocator",
         "//internal:testing",
         "@com_google_absl//absl/strings",
-        "@com_google_protobuf//:protobuf",
-    ],
-)
-
-cc_library(
-    name = "data",
-    hdrs = ["data.h"],
-    deps = [
-        "//common/internal:metadata",
-        "@com_google_absl//absl/base:nullability",
-        "@com_google_absl//absl/log:absl_check",
-        "@com_google_protobuf//:protobuf",
-    ],
-)
-
-cc_test(
-    name = "data_test",
-    srcs = ["data_test.cc"],
-    deps = [
-        ":data",
-        "//common/internal:reference_count",
-        "//internal:testing",
-        "@com_google_absl//absl/base:nullability",
         "@com_google_protobuf//:protobuf",
     ],
 )
