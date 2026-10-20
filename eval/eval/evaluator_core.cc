@@ -44,9 +44,13 @@
 namespace google::api::expr::runtime {
 
 void FlatExpressionEvaluatorState::Reset() {
+  if (!dirty_) {
+    return;
+  }
   value_stack_.Clear();
   iterator_stack_.Clear();
   comprehension_slots_.Reset();
+  dirty_ = false;
 }
 
 const ExpressionStep* ExecutionFrame::NextSlow() {

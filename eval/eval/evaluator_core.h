@@ -488,6 +488,7 @@ class FlatExpressionEvaluatorState {
         arena_(arena) {}
 
   void Reset();
+  void MarkDirty() { dirty_ = true; }
 
   EvaluatorStack& value_stack() { return value_stack_; }
 
@@ -527,6 +528,7 @@ class FlatExpressionEvaluatorState {
   const google::protobuf::DescriptorPool* absl_nonnull descriptor_pool_;
   google::protobuf::MessageFactory* absl_nullability_unknown message_factory_ = nullptr;
   google::protobuf::Arena* absl_nullability_unknown arena_ = nullptr;
+  bool dirty_ = false;
 };
 
 // Context needed for evaluation. This is sufficient for supporting
@@ -728,7 +730,9 @@ class ExecutionFrame : public ExecutionFrameBase {
         execution_path_(flat),
         value_stack_(&state.value_stack()),
         iterator_stack_(&state.iterator_stack()),
-        subexpressions_(&execution_path_, 1) {}
+        subexpressions_(&execution_path_, 1) {
+    state.MarkDirty();
+  }
 
   ExecutionFrame(
       absl::Span<const ExecutionPathView> subexpressions,
@@ -746,6 +750,7 @@ class ExecutionFrame : public ExecutionFrameBase {
         iterator_stack_(&state.iterator_stack()),
         subexpressions_(subexpressions) {
     ABSL_DCHECK(!subexpressions.empty());
+    state.MarkDirty();
   }
 
   // Returns next expression to evaluate.
