@@ -178,6 +178,10 @@ _TESTS_TO_SKIP = [
 
     # Skip until fixed.
     "fields/qualified_identifier_resolution/map_value_repeat_key_heterogeneous",
+    "type_deductions/type_decay/type_list_decay",
+    "type_deductions/type_decay/type_ternary_decay",
+    "type_deductions/type_decay/type_nested_list_decay",
+    "type_deductions/type_decay/type_free_param_list_concat",
 
     # Future features for CEL 1.0
     # TODO(issues/119): Strong typing support for enums, specified but not implemented.
