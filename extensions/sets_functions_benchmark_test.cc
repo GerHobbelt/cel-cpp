@@ -17,50 +17,55 @@
 #include <utility>
 #include <vector>
 
-#include "cel/expr/syntax.pb.h"
 #include "absl/base/nullability.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
+#include "checker/type_checker_builder.h"
+#include "checker/validation_result.h"
+#include "common/ast.h"
+#include "common/decl.h"
+#include "common/legacy_value.h"
+#include "common/minimal_descriptor_pool.h"
+#include "common/type.h"
 #include "common/value.h"
-#include "eval/internal/interop.h"
-#include "eval/public/activation.h"
-#include "eval/public/builtin_func_registrar.h"
-#include "eval/public/cel_expr_builder_factory.h"
-#include "eval/public/cel_expression.h"
-#include "eval/public/cel_options.h"
+#include "compiler/compiler.h"
+#include "compiler/compiler_factory.h"
+#include "compiler/standard_library.h"
 #include "eval/public/cel_value.h"
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "extensions/sets_functions.h"
 #include "internal/benchmark.h"
 #include "internal/status_macros.h"
 #include "internal/testing.h"
-#include "parser/parser.h"
+#include "runtime/activation.h"
+#include "runtime/constant_folding.h"
+#include "runtime/reference_resolver.h"
+#include "runtime/runtime.h"
+#include "runtime/runtime_builder.h"
 #include "runtime/runtime_options.h"
+#include "runtime/standard_runtime_builder_factory.h"
 #include "google/protobuf/arena.h"
 
 namespace cel::extensions {
 namespace {
 
-using ::cel::Value;
-using ::cel::expr::ParsedExpr;
-using ::google::api::expr::parser::Parse;
-using ::google::api::expr::runtime::Activation;
+using ::absl_testing::IsOk;
+using ::google::api::expr::runtime::CelList;
 using ::google::api::expr::runtime::CelValue;
 using ::google::api::expr::runtime::ContainerBackedListImpl;
-using ::google::api::expr::runtime::CreateCelExpressionBuilder;
-using ::google::api::expr::runtime::InterpreterOptions;
-using ::google::api::expr::runtime::RegisterBuiltinFunctions;
 
-enum class ListImpl : int { kLegacy = 0, kWrappedModern = 1, kRhsConstant = 2 };
+enum class ListImpl : int { kLegacy = 0, kModern = 1, kRhsConstant = 2 };
 int ToNumber(ListImpl impl) { return static_cast<int>(impl); }
 ListImpl FromNumber(int number) {
   switch (number) {
     case 0:
       return ListImpl::kLegacy;
     case 1:
-      return ListImpl::kWrappedModern;
+      return ListImpl::kModern;
     case 2:
       return ListImpl::kRhsConstant;
     default:
@@ -73,7 +78,7 @@ struct TestCase {
   std::string expr;
   ListImpl list_impl;
   int size;
-  CelValue result;
+  bool result;
 
   std::string MakeLabel(int len) const {
     std::string list_impl;
@@ -81,8 +86,8 @@ struct TestCase {
       case ListImpl::kRhsConstant:
         list_impl = "rhs_constant";
         break;
-      case ListImpl::kWrappedModern:
-        list_impl = "wrapped_modern";
+      case ListImpl::kModern:
+        list_impl = "modern";
         break;
       case ListImpl::kLegacy:
         list_impl = "legacy";
@@ -93,43 +98,9 @@ struct TestCase {
   }
 };
 
-class ListStorage {
- public:
-  virtual ~ListStorage() = default;
-};
-
-class LegacyListStorage : public ListStorage {
- public:
-  LegacyListStorage(ContainerBackedListImpl x, ContainerBackedListImpl y)
-      : x_(std::move(x)), y_(std::move(y)) {}
-
-  CelValue x() { return CelValue::CreateList(&x_); }
-  CelValue y() { return CelValue::CreateList(&y_); }
-
- private:
-  ContainerBackedListImpl x_;
-  ContainerBackedListImpl y_;
-};
-
-class ModernListStorage : public ListStorage {
- public:
-  ModernListStorage(Value x, Value y) : x_(std::move(x)), y_(std::move(y)) {}
-
-  CelValue x() {
-    return interop_internal::ModernValueToLegacyValueOrDie(&arena_, x_);
-  }
-  CelValue y() {
-    return interop_internal::ModernValueToLegacyValueOrDie(&arena_, y_);
-  }
-
- private:
-  google::protobuf::Arena arena_;
-  Value x_;
-  Value y_;
-};
-
-absl::StatusOr<std::unique_ptr<ListStorage>> RegisterLegacyLists(
-    bool overlap, int len, Activation& activation) {
+absl::Status RegisterLegacyLists(bool overlap, int len,
+                                 google::protobuf::Arena* absl_nonnull arena,
+                                 Activation& activation) {
   std::vector<CelValue> x;
   std::vector<CelValue> y;
   x.reserve(len + 1);
@@ -144,30 +115,33 @@ absl::StatusOr<std::unique_ptr<ListStorage>> RegisterLegacyLists(
     y.push_back(CelValue::CreateInt64(2));
   }
 
-  auto result = std::make_unique<LegacyListStorage>(
-      ContainerBackedListImpl(std::move(x)),
-      ContainerBackedListImpl(std::move(y)));
+  const CelList* x_list =
+      google::protobuf::Arena::Create<ContainerBackedListImpl>(arena, std::move(x));
+  const CelList* y_list =
+      google::protobuf::Arena::Create<ContainerBackedListImpl>(arena, std::move(y));
 
-  activation.InsertValue("x", result->x());
-  activation.InsertValue("y", result->y());
-  return result;
+  CEL_ASSIGN_OR_RETURN(Value x_val,
+                       cel::ModernValue(arena, CelValue::CreateList(x_list)));
+  CEL_ASSIGN_OR_RETURN(Value y_val,
+                       cel::ModernValue(arena, CelValue::CreateList(y_list)));
+
+  activation.InsertOrAssignValue("x", std::move(x_val));
+  activation.InsertOrAssignValue("y", std::move(y_val));
+  return absl::OkStatus();
 }
 
 // Constant list literal that has the same elements as the bound test cases.
 std::string ConstantList(bool overlap, int len) {
-  std::string list_body;
-  for (int i = 0; i < len; i++) {
-  }
   return absl::StrCat("[", overlap ? "1, " : "",
                       absl::StrJoin(std::vector<std::string>(len, "2"), ", "),
                       "]");
 }
 
-absl::StatusOr<std::unique_ptr<ListStorage>> RegisterModernLists(
-    bool overlap, int len, google::protobuf::Arena* absl_nonnull arena,
-    Activation& activation) {
-  auto x_builder = cel::NewListValueBuilder(arena);
-  auto y_builder = cel::NewListValueBuilder(arena);
+absl::Status RegisterModernLists(bool overlap, int len,
+                                 google::protobuf::Arena* absl_nonnull arena,
+                                 Activation& activation) {
+  ListValueBuilderPtr x_builder = cel::NewListValueBuilder(arena);
+  ListValueBuilderPtr y_builder = cel::NewListValueBuilder(arena);
 
   x_builder->Reserve(len + 1);
   y_builder->Reserve(len + 1);
@@ -182,81 +156,139 @@ absl::StatusOr<std::unique_ptr<ListStorage>> RegisterModernLists(
     CEL_RETURN_IF_ERROR(y_builder->Add(cel::IntValue(2)));
   }
 
-  auto x = std::move(*x_builder).Build();
-  auto y = std::move(*y_builder).Build();
-  auto result = std::make_unique<ModernListStorage>(std::move(x), std::move(y));
-  activation.InsertValue("x", result->x());
-  activation.InsertValue("y", result->y());
+  activation.InsertOrAssignValue("x", std::move(*x_builder).Build());
+  activation.InsertOrAssignValue("y", std::move(*y_builder).Build());
 
-  return result;
+  return absl::OkStatus();
 }
 
-absl::StatusOr<std::unique_ptr<ListStorage>> RegisterLists(
-    bool overlap, int len, bool use_modern, google::protobuf::Arena* absl_nonnull arena,
-    Activation& activation) {
+absl::Status RegisterLists(bool overlap, int len, bool use_modern,
+                           google::protobuf::Arena* absl_nonnull arena,
+                           Activation& activation) {
   if (use_modern) {
     return RegisterModernLists(overlap, len, arena, activation);
   } else {
-    return RegisterLegacyLists(overlap, len, activation);
+    return RegisterLegacyLists(overlap, len, arena, activation);
   }
 }
 
+absl::StatusOr<std::unique_ptr<Compiler>> CreateBenchmarkCompiler() {
+  CEL_ASSIGN_OR_RETURN(std::unique_ptr<CompilerBuilder> builder,
+                       NewCompilerBuilder(cel::GetMinimalDescriptorPool()));
+  CEL_RETURN_IF_ERROR(builder->AddLibrary(StandardCompilerLibrary()));
+  CEL_RETURN_IF_ERROR(builder->AddLibrary(SetsCompilerLibrary()));
+
+  TypeCheckerBuilder& checker = builder->GetCheckerBuilder();
+  CEL_RETURN_IF_ERROR(checker.AddVariable(
+      MakeVariableDecl("x", ListType(checker.arena(), IntType()))));
+  CEL_RETURN_IF_ERROR(checker.AddVariable(
+      MakeVariableDecl("y", ListType(checker.arena(), IntType()))));
+
+  return builder->Build();
+}
+
+absl::StatusOr<std::unique_ptr<const Runtime>> CreateBenchmarkRuntime(
+    google::protobuf::Arena* absl_nonnull arena) {
+  RuntimeOptions options;
+  CEL_ASSIGN_OR_RETURN(
+      RuntimeBuilder builder,
+      CreateStandardRuntimeBuilder(cel::GetMinimalDescriptorPool(), options));
+  CEL_RETURN_IF_ERROR(
+      RegisterSetsFunctions(builder.function_registry(), options));
+  CEL_RETURN_IF_ERROR(
+      EnableReferenceResolver(builder, ReferenceResolverEnabled::kAlways));
+  CEL_RETURN_IF_ERROR(EnableConstantFolding(builder, arena));
+  return std::move(builder).Build();
+}
+
 void RunBenchmark(const TestCase& test_case, benchmark::State& state) {
-  bool lists_overlap = test_case.result.BoolOrDie();
+  bool lists_overlap = test_case.result;
 
   std::string expr = test_case.expr;
   if (test_case.list_impl == ListImpl::kRhsConstant) {
     expr = absl::StrReplaceAll(
         expr, {{"y", ConstantList(lists_overlap, test_case.size)}});
   }
-  ASSERT_OK_AND_ASSIGN(ParsedExpr parsed_expr, Parse(expr));
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Compiler> compiler,
+                       CreateBenchmarkCompiler());
+  ASSERT_OK_AND_ASSIGN(ValidationResult validation_result,
+                       compiler->Compile(expr));
+  ASSERT_TRUE(validation_result.IsValid()) << validation_result.FormatError();
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Ast> ast,
+                       validation_result.ReleaseAst());
 
   google::protobuf::Arena arena;
-
-  InterpreterOptions options;
-  options.constant_folding = true;
-  options.constant_arena = &arena;
-  options.enable_qualified_identifier_rewrites = true;
-  auto builder = CreateCelExpressionBuilder(options);
-  ASSERT_OK(RegisterBuiltinFunctions(builder->GetRegistry(), options));
-  ASSERT_OK(RegisterSetsFunctions(builder->GetRegistry()->InternalGetRegistry(),
-                                  cel::RuntimeOptions{}));
-  ASSERT_OK_AND_ASSIGN(
-      auto cel_expr, builder->CreateExpression(&(parsed_expr.expr()), nullptr));
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<const Runtime> runtime,
+                       CreateBenchmarkRuntime(&arena));
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Program> program,
+                       runtime->CreateProgram(std::move(ast)));
 
   Activation activation;
-  ASSERT_OK_AND_ASSIGN(
-      auto storage,
-      RegisterLists(test_case.result.BoolOrDie(), test_case.size,
-                    test_case.list_impl == ListImpl::kWrappedModern, &arena,
-                    activation));
+  ASSERT_THAT(RegisterLists(test_case.result, test_case.size,
+                            test_case.list_impl != ListImpl::kLegacy, &arena,
+                            activation),
+              IsOk());
 
   state.SetLabel(test_case.MakeLabel(test_case.size));
   for (auto _ : state) {
-    ASSERT_OK_AND_ASSIGN(CelValue result,
-                         cel_expr->Evaluate(activation, &arena));
+    ASSERT_OK_AND_ASSIGN(Value result, program->Evaluate(&arena, activation));
     ASSERT_TRUE(result.IsBool());
-    ASSERT_EQ(result.BoolOrDie(), test_case.result.BoolOrDie())
+    ASSERT_EQ(result.GetBool().NativeValue(), test_case.result)
         << test_case.test_name;
   }
+}
+
+void BM_SetsContainsTrue(benchmark::State& state) {
+  ListImpl impl = FromNumber(state.range(0));
+  int size = state.range(1);
+
+  RunBenchmark({"sets.contains_true", "sets.contains(x, y)", impl, size, true},
+               state);
+}
+
+void BM_SetsContainsFalse(benchmark::State& state) {
+  ListImpl impl = FromNumber(state.range(0));
+  int size = state.range(1);
+
+  RunBenchmark(
+      {"sets.contains_false", "sets.contains(x, y)", impl, size, false}, state);
+}
+
+void BM_SetsContainsComprehensionTrue(benchmark::State& state) {
+  ListImpl impl = FromNumber(state.range(0));
+  int size = state.range(1);
+
+  RunBenchmark(
+      {"comprehension_contains_true", "x.all(i, i in y)", impl, size, true},
+      state);
+}
+
+void BM_SetsContainsComprehensionFalse(benchmark::State& state) {
+  ListImpl impl = FromNumber(state.range(0));
+  int size = state.range(1);
+
+  RunBenchmark(
+      {"comprehension_contains_false", "x.all(i, i in y)", impl, size, false},
+      state);
 }
 
 void BM_SetsIntersectsTrue(benchmark::State& state) {
   ListImpl impl = FromNumber(state.range(0));
   int size = state.range(1);
 
-  RunBenchmark({"sets.intersects_true", "sets.intersects(x, y)", impl, size,
-                CelValue::CreateBool(true)},
-               state);
+  RunBenchmark(
+      {"sets.intersects_true", "sets.intersects(x, y)", impl, size, true},
+      state);
 }
 
 void BM_SetsIntersectsFalse(benchmark::State& state) {
   ListImpl impl = FromNumber(state.range(0));
   int size = state.range(1);
 
-  RunBenchmark({"sets.intersects_false", "sets.intersects(x, y)", impl, size,
-                CelValue::CreateBool(false)},
-               state);
+  RunBenchmark(
+      {"sets.intersects_false", "sets.intersects(x, y)", impl, size, false},
+      state);
 }
 
 void BM_SetsIntersectsComprehensionTrue(benchmark::State& state) {
@@ -264,7 +296,7 @@ void BM_SetsIntersectsComprehensionTrue(benchmark::State& state) {
   int size = state.range(1);
 
   RunBenchmark({"comprehension_intersects_true", "x.exists(i, i in y)", impl,
-                size, CelValue::CreateBool(true)},
+                size, true},
                state);
 }
 
@@ -273,7 +305,7 @@ void BM_SetsIntersectsComprehensionFalse(benchmark::State& state) {
   int size = state.range(1);
 
   RunBenchmark({"comprehension_intersects_false", "x.exists(i, i in y)", impl,
-                size, CelValue::CreateBool(false)},
+                size, false},
                state);
 }
 
@@ -281,49 +313,52 @@ void BM_SetsEquivalentTrue(benchmark::State& state) {
   ListImpl impl = FromNumber(state.range(0));
   int size = state.range(1);
 
-  RunBenchmark({"sets.equivalent_true", "sets.equivalent(x, y)", impl, size,
-                CelValue::CreateBool(true)},
-               state);
+  RunBenchmark(
+      {"sets.equivalent_true", "sets.equivalent(x, y)", impl, size, true},
+      state);
 }
 
 void BM_SetsEquivalentFalse(benchmark::State& state) {
   ListImpl impl = FromNumber(state.range(0));
   int size = state.range(1);
 
-  RunBenchmark({"sets.equivalent_false", "sets.equivalent(x, y)", impl, size,
-                CelValue::CreateBool(false)},
-               state);
+  RunBenchmark(
+      {"sets.equivalent_false", "sets.equivalent(x, y)", impl, size, false},
+      state);
 }
 
 void BM_SetsEquivalentComprehensionTrue(benchmark::State& state) {
   ListImpl impl = FromNumber(state.range(0));
   int size = state.range(1);
 
-  RunBenchmark(
-      {"comprehension_equivalent_true", "x.all(i, i in y) && y.all(j, j in x)",
-       impl, size, CelValue::CreateBool(true)},
-      state);
+  RunBenchmark({"comprehension_equivalent_true",
+                "x.all(i, i in y) && y.all(j, j in x)", impl, size, true},
+               state);
 }
 
 void BM_SetsEquivalentComprehensionFalse(benchmark::State& state) {
   ListImpl impl = FromNumber(state.range(0));
   int size = state.range(1);
 
-  RunBenchmark(
-      {"comprehension_equivalent_false", "x.all(i, i in y) && y.all(j, j in x)",
-       impl, size, CelValue::CreateBool(false)},
-      state);
+  RunBenchmark({"comprehension_equivalent_false",
+                "x.all(i, i in y) && y.all(j, j in x)", impl, size, false},
+               state);
 }
 
 template <typename Benchmark>
 void BenchArgs(Benchmark* bench) {
   for (ListImpl impl :
-       {ListImpl::kLegacy, ListImpl::kWrappedModern, ListImpl::kRhsConstant}) {
+       {ListImpl::kLegacy, ListImpl::kModern, ListImpl::kRhsConstant}) {
     for (int size : {1, 8, 32, 64, 256}) {
       bench->ArgPair(ToNumber(impl), size);
     }
   }
 }
+
+BENCHMARK(BM_SetsContainsComprehensionTrue)->Apply(BenchArgs);
+BENCHMARK(BM_SetsContainsComprehensionFalse)->Apply(BenchArgs);
+BENCHMARK(BM_SetsContainsTrue)->Apply(BenchArgs);
+BENCHMARK(BM_SetsContainsFalse)->Apply(BenchArgs);
 
 BENCHMARK(BM_SetsIntersectsComprehensionTrue)->Apply(BenchArgs);
 BENCHMARK(BM_SetsIntersectsComprehensionFalse)->Apply(BenchArgs);
