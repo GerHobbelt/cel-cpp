@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "cel/expr/syntax.pb.h"
 #include "absl/status/status_matchers.h"
@@ -23,6 +24,8 @@
 #include "checker/validation_result.h"
 #include "common/ast_proto.h"
 #include "common/minimal_descriptor_pool.h"
+#include "common/value.h"
+#include "compiler/compiler.h"
 #include "compiler/compiler_factory.h"
 #include "eval/public/activation.h"
 #include "eval/public/builtin_func_registrar.h"
@@ -32,7 +35,11 @@
 #include "eval/public/cel_options.h"
 #include "eval/public/cel_value.h"
 #include "internal/testing.h"
+#include "runtime/activation.h"
+#include "runtime/runtime.h"
+#include "runtime/runtime_builder.h"
 #include "runtime/runtime_options.h"
+#include "runtime/standard_runtime_builder_factory.h"
 #include "google/protobuf/arena.h"
 
 namespace cel::extensions {
@@ -91,6 +98,44 @@ TEST_P(CelSetsFunctionsTest, EndToEnd) {
   ASSERT_OK_AND_ASSIGN(CelValue out, cel_expr->Evaluate(activation, &arena));
   ASSERT_TRUE(out.IsBool()) << test_info.expr << " -> " << out.DebugString();
   EXPECT_TRUE(out.BoolOrDie()) << test_info.expr << " -> " << out.DebugString();
+}
+
+TEST_P(CelSetsFunctionsTest, RuntimeEndToEnd) {
+  const TestInfo& test_info = GetParam();
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<CompilerBuilder> compiler_builder,
+                       NewCompilerBuilder(cel::GetMinimalDescriptorPool()));
+
+  ASSERT_THAT(compiler_builder->AddLibrary(StandardCheckerLibrary()), IsOk());
+  ASSERT_THAT(compiler_builder->AddLibrary(SetsCompilerLibrary()), IsOk());
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<const Compiler> compiler,
+                       compiler_builder->Build());
+
+  ASSERT_OK_AND_ASSIGN(ValidationResult compiled,
+                       compiler->Compile(test_info.expr));
+
+  ASSERT_TRUE(compiled.IsValid()) << compiled.FormatError();
+
+  RuntimeOptions options;
+  options.enable_heterogeneous_equality = true;
+  options.enable_empty_wrapper_null_unboxing = true;
+  options.enable_qualified_type_identifiers = true;
+  ASSERT_OK_AND_ASSIGN(
+      RuntimeBuilder runtime_builder,
+      CreateStandardRuntimeBuilder(cel::GetMinimalDescriptorPool(), options));
+  ASSERT_THAT(
+      RegisterSetsFunctions(runtime_builder.function_registry(), options),
+      IsOk());
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<const Runtime> runtime,
+                       std::move(runtime_builder).Build());
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Program> program,
+                       runtime->CreateProgram(*compiled.ReleaseAst()));
+  Arena arena;
+  cel::Activation activation;
+  ASSERT_OK_AND_ASSIGN(Value out, program->Evaluate(&arena, activation));
+  ASSERT_TRUE(out.IsBool()) << test_info.expr << " -> " << out.DebugString();
+  EXPECT_TRUE(out.GetBool().NativeValue())
+      << test_info.expr << " -> " << out.DebugString();
 }
 
 INSTANTIATE_TEST_SUITE_P(
