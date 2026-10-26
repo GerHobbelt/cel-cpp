@@ -44,9 +44,13 @@
 namespace google::api::expr::runtime {
 
 void FlatExpressionEvaluatorState::Reset() {
+  if (!dirty_) {
+    return;
+  }
   value_stack_.Clear();
   iterator_stack_.Clear();
   comprehension_slots_.Reset();
+  dirty_ = false;
 }
 
 const ExpressionStep* ExecutionFrame::NextSlow() {
@@ -245,9 +249,8 @@ absl::StatusOr<cel::Value> FlatExpression::EvaluateWithCallback(
     const cel::EmbedderContext* absl_nullable embedder_context,
     EvaluationListener listener, FlatExpressionEvaluatorState& state) const {
   state.Reset();
-
   ExecutionFrame frame(subexpressions_, activation, options_, state,
-                       std::move(listener), embedder_context);
+                       std::move(listener), embedder_context, identifiers_);
 
   return frame.Evaluate(frame.callback());
 }
@@ -366,6 +369,13 @@ FixedJumpStepInfo* GetIfFixedJumpStep(ExpressionStep& step) {
   return nullptr;
 }
 
+IdentStepInfo* GetIfIdentStep(ExpressionStep& step) {
+  if (step.header_.kind == ExpressionStepKind::kIdentifier) {
+    return &step.u_.ident_step;
+  }
+  return nullptr;
+}
+
 std::optional<int64_t> ExpressionStep::StackDelta() const {
   switch (header_.kind) {
     case ExpressionStepKind::kMovedFrom:
@@ -420,5 +430,4 @@ std::optional<int64_t> ExpressionStep::StackDelta() const {
   }
   return std::nullopt;
 }
-
 }  // namespace google::api::expr::runtime

@@ -46,10 +46,11 @@ using ::cel::runtime_internal::CreateNoMatchingOverloadError;
 // errors or unknown sets must be allowed as a non-strict function.
 bool ShouldAcceptOverload(const cel::FunctionDescriptor& descriptor,
                           absl::Span<const cel::Value> arguments) {
-  for (size_t i = 0; i < arguments.size(); i++) {
-    if (arguments[i]->Is<cel::UnknownValue>() ||
-        arguments[i]->Is<cel::ErrorValue>()) {
-      return !descriptor.is_strict();
+  if (descriptor.is_strict()) {
+    for (const auto& argument : arguments) {
+      if (argument.IsError() || argument.IsUnknown()) {
+        return false;
+      }
     }
   }
   return true;

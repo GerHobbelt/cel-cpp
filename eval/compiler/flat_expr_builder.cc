@@ -71,6 +71,7 @@
 #include "eval/eval/evaluator_core.h"
 #include "eval/eval/expression_step_logic.h"
 #include "eval/eval/function_step.h"
+#include "eval/eval/ident_step.h"
 #include "eval/eval/optional_or_step.h"
 #include "eval/eval/select_step.h"
 #include "eval/eval/shadowable_value_step.h"
@@ -878,8 +879,12 @@ class FlatExprVisitor : public cel::AstVisitor {
       return;
     }
 
+    if (PlanningSuppressed()) {
+      return;
+    }
     absl::string_view ident_name = absl::StripPrefix(ident_expr.name(), ".");
-      AddStep(ExpressionStep::MakeIdentifierStep(ident_name, expr.id()));
+    size_t ident_index = AddOrUpdateIdentifier(ident_name);
+    AddStep(ExpressionStep::MakeIdentifierStep(ident_index, expr.id()));
   }
 
   void PreVisitSelect(const cel::Expr& expr,
@@ -1545,6 +1550,15 @@ class FlatExprVisitor : public cel::AstVisitor {
     return index_manager_.IterStackRequirement();
   }
 
+  IdentifierTable BuildIdentifierTable(size_t& total_slot_count) && {
+    IdentifierTable table;
+    table.reserve(identifiers_.size());
+    for (std::string& name : identifiers_) {
+      table.push_back(Identifier{std::move(name), total_slot_count++});
+    }
+    return table;
+  }
+
   void AddOptimizer(std::unique_ptr<ProgramOptimizer> optimizer) {
     program_optimizers_.push_back(std::move(optimizer));
   }
@@ -1696,6 +1710,8 @@ class FlatExprVisitor : public cel::AstVisitor {
 
   void MaybeResolveType(const cel::Expr& expr);
 
+  size_t AddOrUpdateIdentifier(absl::string_view name);
+
   const Resolver& resolver_;
   const cel::TypeProvider& type_provider_;
   absl::Status progress_status_;
@@ -1723,6 +1739,8 @@ class FlatExprVisitor : public cel::AstVisitor {
   ProgramBuilder& program_builder_;
   PlannerContext& extension_context_;
   IndexManager index_manager_;
+  std::vector<std::string> identifiers_;
+  absl::flat_hash_map<std::string, size_t> identifier_map_;
 
   bool enable_optional_types_;
   std::optional<FlatExprVisitor::BlockInfo> block_;
@@ -1867,6 +1885,16 @@ void FlatExprVisitor::MaybeResolveType(const cel::Expr& expr) {
     return;
   }
   extension_context_.SetResolvedType(expr.id(), *type);
+}
+
+size_t FlatExprVisitor::AddOrUpdateIdentifier(absl::string_view name) {
+  auto it = identifier_map_.find(name);
+  if (it == identifier_map_.end()) {
+    size_t index = identifiers_.size();
+    it = identifier_map_.emplace(name, index).first;
+    identifiers_.push_back(std::string(name));
+  }
+  return it->second;
 }
 
 void LogicalCondVisitor::PreVisit(const cel::Expr* expr) {
@@ -2384,7 +2412,12 @@ absl::StatusOr<FlatExpression> FlatExprBuilder::CreateExpressionImpl(
     return visitor.progress_status();
   }
 
-  if (visitor.slot_count() > std::numeric_limits<uint32_t>::max() ||
+  size_t total_slot_count = visitor.slot_count();
+  size_t iterator_stack_size = visitor.iter_stack_count();
+  IdentifierTable identifiers =
+      std::move(visitor).BuildIdentifierTable(total_slot_count);
+
+  if (total_slot_count > std::numeric_limits<uint32_t>::max() ||
       program_builder.ExtractedSubexpressionCount() >
           std::numeric_limits<uint32_t>::max()) {
     // Impractical to trigger (we'd run out of memory first), but assuming this
@@ -2399,10 +2432,21 @@ absl::StatusOr<FlatExpression> FlatExprBuilder::CreateExpressionImpl(
   size_t value_stack_size =
       EstimateMaxStackSize(subexpressions, execution_path.size());
 
+  // Iterate over execution path and update identifier steps with resolved slot.
+  // TODO(b/572083203): Should invert this so the local slots are stored
+  // after the global ones.
+  for (ExpressionStep& step : execution_path) {
+    if (IdentStepInfo* ident_step = GetIfIdentStep(step);
+        ident_step != nullptr) {
+      ident_step->slot_index = static_cast<uint32_t>(
+          identifiers[ident_step->ident_index].slot_index);
+    }
+  }
+
   return FlatExpression(std::move(execution_path), std::move(subexpressions),
-                        visitor.slot_count(), visitor.iter_stack_count(),
+                        total_slot_count, iterator_stack_size,
                         GetTypeProvider(), options_, std::move(arena),
-                        value_stack_size);
+                        std::move(identifiers), value_stack_size);
 }
 const cel::TypeProvider& FlatExprBuilder::GetTypeProvider() const {
   return use_legacy_type_provider_
