@@ -105,7 +105,12 @@ class FlatExprVisitor;
 // Helper for bookkeeping variables mapped to indexes.
 class IndexManager {
  public:
-  IndexManager() : next_free_slot_(0), max_slot_count_(0) {}
+  IndexManager()
+      : next_free_slot_(0),
+        max_slot_count_(0),
+        iter_stack_count_(0),
+        max_iter_stack_count_(0),
+        lazy_iter_stack_count_(0) {}
 
   size_t ReserveSlots(size_t n) {
     size_t result = next_free_slot_;
@@ -121,11 +126,30 @@ class IndexManager {
     return next_free_slot_;
   }
 
+  void ReserveIterStack() {
+    ++iter_stack_count_;
+    max_iter_stack_count_ = std::max(max_iter_stack_count_, iter_stack_count_);
+  }
+  void ReleaseIterStack() { --iter_stack_count_; }
+  void AddLazyIterStack() { ++lazy_iter_stack_count_; }
+
   size_t max_slot_count() const { return max_slot_count_; }
+
+  // Returns the maximum number of iterator stack slots required to evaluate the
+  // expression by tracking the maximum comprehension nesting in the main
+  // expression and dedicating a slot for any comprehensions evaluated lazily.
+  // This is not as tight as possible, but is a correct upper bound estimate and
+  // is tight for small expressions.
+  size_t IterStackRequirement() const {
+    return max_iter_stack_count_ + lazy_iter_stack_count_;
+  }
 
  private:
   size_t next_free_slot_;
   size_t max_slot_count_;
+  size_t iter_stack_count_;
+  size_t max_iter_stack_count_;
+  size_t lazy_iter_stack_count_;
 };
 
 // Helper for computing jump offsets.
@@ -282,12 +306,15 @@ size_t SizeHint(const cel::Expr& expr) {
 // macro implementation. It is not exhaustive, so it is unsafe to use with
 // custom comprehensions outside of the standard macros or hand crafted ASTs.
 bool IsOptimizableListAppend(const cel::ComprehensionExpr* comprehension,
-                             bool enable_comprehension_list_append) {
+                             bool enable_comprehension_list_append,
+                             bool short_circuiting = true) {
   if (!enable_comprehension_list_append) {
     return false;
   }
   absl::string_view accu_var = comprehension->accu_var();
-  if (accu_var.empty() ||
+  if (accu_var.empty() || !absl::StartsWith(accu_var, "@") ||
+      !comprehension->has_result() ||
+      !comprehension->result().has_ident_expr() ||
       comprehension->result().ident_expr().name() != accu_var) {
     return false;
   }
@@ -308,7 +335,9 @@ bool IsOptimizableListAppend(const cel::ComprehensionExpr* comprehension,
 
   if (call_expr->function() == cel::builtin::kTernary &&
       call_expr->args().size() == 3) {
-    if (!call_expr->args()[1].has_call_expr()) {
+    if (!short_circuiting || !call_expr->args()[1].has_call_expr() ||
+        !call_expr->args()[2].has_ident_expr() ||
+        call_expr->args()[2].ident_expr().name() != accu_var) {
       return false;
     }
     call_expr = &(call_expr->args()[1].call_expr());
@@ -319,7 +348,8 @@ bool IsOptimizableListAppend(const cel::ComprehensionExpr* comprehension,
          call_expr->args()[0].has_ident_expr() &&
          call_expr->args()[0].ident_expr().name() == accu_var &&
          call_expr->args()[1].has_list_expr() &&
-         call_expr->args()[1].list_expr().elements().size() == 1;
+         call_expr->args()[1].list_expr().elements().size() == 1 &&
+         !call_expr->args()[1].list_expr().elements()[0].optional();
 }
 
 // Assuming `IsOptimizableListAppend()` return true, return a pointer to the
@@ -353,7 +383,8 @@ const cel::Expr* GetOptimizableListAppendOperand(
 // map transformations. It is not exhaustive, so it is unsafe to use with custom
 // comprehensions outside of the standard macros or hand crafted ASTs.
 bool IsOptimizableMapInsert(const cel::ComprehensionExpr* comprehension,
-                            bool enable_comprehension_mutable_map) {
+                            bool enable_comprehension_mutable_map,
+                            bool short_circuiting = true) {
   if (!enable_comprehension_mutable_map) {
     return false;
   }
@@ -361,12 +392,14 @@ bool IsOptimizableMapInsert(const cel::ComprehensionExpr* comprehension,
     return false;
   }
   absl::string_view accu_var = comprehension->accu_var();
-  if (accu_var.empty() || !comprehension->has_result() ||
+  if (accu_var.empty() || !absl::StartsWith(accu_var, "@") ||
+      !comprehension->has_result() ||
       !comprehension->result().has_ident_expr() ||
       comprehension->result().ident_expr().name() != accu_var) {
     return false;
   }
-  if (!comprehension->accu_init().has_map_expr()) {
+  if (!comprehension->accu_init().has_map_expr() ||
+      !comprehension->accu_init().map_expr().entries().empty()) {
     return false;
   }
   if (!comprehension->loop_step().has_call_expr()) {
@@ -376,7 +409,9 @@ bool IsOptimizableMapInsert(const cel::ComprehensionExpr* comprehension,
 
   if (call_expr->function() == cel::builtin::kTernary &&
       call_expr->args().size() == 3) {
-    if (!call_expr->args()[1].has_call_expr()) {
+    if (!short_circuiting || !call_expr->args()[1].has_call_expr() ||
+        !call_expr->args()[2].has_ident_expr() ||
+        call_expr->args()[2].ident_expr().name() != accu_var) {
       return false;
     }
     call_expr = &(call_expr->args()[1].call_expr());
@@ -467,6 +502,17 @@ absl::flat_hash_set<int32_t> MakeOptionalIndicesSet(
   for (size_t i = 0; i < map_expr.entries().size(); ++i) {
     if (map_expr.entries()[i].optional()) {
       optional_indices.insert(static_cast<int32_t>(i));
+    }
+  }
+  return optional_indices;
+}
+
+absl::flat_hash_set<size_t> MakeOptionalIndicesSet(
+    const cel::ListExpr& list_expr) {
+  absl::flat_hash_set<size_t> optional_indices;
+  for (size_t i = 0; i < list_expr.elements().size(); ++i) {
+    if (list_expr.elements()[i].optional()) {
+      optional_indices.insert(i);
     }
   }
   return optional_indices;
@@ -1121,19 +1167,32 @@ class FlatExprVisitor : public cel::AstVisitor {
         slot_count = 0;
       }
     }
+
     // If this is in the scope of an optimized bind accu-init, account the slots
     // to the outermost bind-init scope.
     //
     // The init expression is effectively inlined at the first usage in the
     // critical path (which is unknown at plan time), so the used slots need to
     // be dedicated for the entire scope of that bind.
+    bool in_bind_init = false;
     for (ComprehensionStackRecord& record : comprehension_stack_) {
       if (record.in_accu_init && record.is_optimizable_bind) {
         record.slot_count += slot_count;
         slot_count = 0;
+        in_bind_init = true;
         break;
       }
       // If no bind init subexpression, account normally.
+    }
+
+    const bool is_stack_releasable =
+        !in_bind_init && (!block_.has_value() || !block_->in);
+    if (!is_bind) {
+      if (is_stack_releasable) {
+        index_manager_.AddLazyIterStack();
+      } else {
+        index_manager_.ReserveIterStack();
+      }
     }
 
     comprehension_stack_.push_back(
@@ -1141,11 +1200,14 @@ class FlatExprVisitor : public cel::AstVisitor {
          /*subexpression=*/-1,
          /*.is_optimizable_list_append=*/
          IsOptimizableListAppend(&comprehension,
-                                 options_.enable_comprehension_list_append),
+                                 options_.enable_comprehension_list_append,
+                                 options_.short_circuiting),
          /*.is_optimizable_map_insert=*/
          IsOptimizableMapInsert(&comprehension,
-                                options_.enable_comprehension_mutable_map),
+                                options_.enable_comprehension_mutable_map,
+                                options_.short_circuiting),
          /*.is_optimizable_bind=*/is_bind,
+         /*.is_stack_releasable=*/is_stack_releasable,
          /*.iter_var_in_scope=*/false,
          /*.iter_var2_in_scope=*/false,
          /*.accu_var_in_scope=*/false,
@@ -1172,6 +1234,9 @@ class FlatExprVisitor : public cel::AstVisitor {
     record.visitor->PostVisit(&expr);
 
     index_manager_.ReleaseSlots(record.slot_count);
+    if (record.is_stack_releasable) {
+      index_manager_.ReleaseIterStack();
+    }
     comprehension_stack_.pop_back();
   }
 
@@ -1296,7 +1361,17 @@ class FlatExprVisitor : public cel::AstVisitor {
         }
       }
     }
-    AddStep(CreateCreateListStep(list_expr), expr.id());
+    absl::flat_hash_set<size_t> optional_indices =
+        MakeOptionalIndicesSet(list_expr);
+    for (size_t index : optional_indices) {
+      if (!ValidateOrError(index < list_expr.elements().size(),
+                           "Optional index out of range: ", index,
+                           ", list size: ", list_expr.elements().size())) {
+        return;
+      }
+    }
+    AddStep(CreateCreateListStep(list_expr.elements().size(),
+                                 std::move(optional_indices), expr.id()));
   }
 
   // CreateStruct node handler.
@@ -1463,6 +1538,10 @@ class FlatExprVisitor : public cel::AstVisitor {
 
   size_t slot_count() const { return index_manager_.max_slot_count(); }
 
+  size_t iter_stack_count() const {
+    return index_manager_.IterStackRequirement();
+  }
+
   void AddOptimizer(std::unique_ptr<ProgramOptimizer> optimizer) {
     program_optimizers_.push_back(std::move(optimizer));
   }
@@ -1494,6 +1573,7 @@ class FlatExprVisitor : public cel::AstVisitor {
     bool is_optimizable_list_append;
     bool is_optimizable_map_insert;
     bool is_optimizable_bind;
+    bool is_stack_releasable;
     bool iter_var_in_scope;
     bool iter_var2_in_scope;
     bool accu_var_in_scope;
@@ -2262,8 +2342,8 @@ absl::StatusOr<FlatExpression> FlatExprBuilder::CreateExpressionImpl(
       FlattenExpressionTable(program_builder, execution_path);
 
   return FlatExpression(std::move(execution_path), std::move(subexpressions),
-                        visitor.slot_count(), GetTypeProvider(), options_,
-                        std::move(arena));
+                        visitor.slot_count(), visitor.iter_stack_count(),
+                        GetTypeProvider(), options_, std::move(arena));
 }
 const cel::TypeProvider& FlatExprBuilder::GetTypeProvider() const {
   return use_legacy_type_provider_

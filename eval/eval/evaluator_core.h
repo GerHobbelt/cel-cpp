@@ -39,6 +39,7 @@
 #include "eval/eval/attribute_utility.h"
 #include "eval/eval/comprehension_slots.h"
 #include "eval/eval/comprehension_step.h"
+#include "eval/eval/create_list_step.h"
 #include "eval/eval/equality_steps.h"
 #include "eval/eval/evaluator_stack.h"
 #include "eval/eval/expression_step_logic.h"
@@ -112,6 +113,9 @@ enum class ExpressionStepKind : uint16_t {
   // Special built-in steps for mutable lists implementing map/filter.
   kNewMutableList = 31,
   kMutableListAppend = 32,
+  // Create list step.
+  kCreateList = 33,
+  kCreateSmallList = 34,
 };
 
 struct BoolJumpStepInfo {
@@ -336,6 +340,20 @@ class ExpressionStep {
     return step;
   }
 
+  static ExpressionStep MakeCreateListStep(
+      std::unique_ptr<ListStepInfo> step_impl, int64_t id = -1) {
+    ExpressionStep step(ExpressionStepKind::kCreateList, id);
+    step.u_.create_list_step = step_impl.release();
+    return step;
+  }
+
+  static ExpressionStep MakeCreateSmallListStep(SmallListStepInfo info,
+                                                int64_t id = -1) {
+    ExpressionStep step(ExpressionStepKind::kCreateSmallList, id);
+    step.u_.create_small_list_step = info;
+    return step;
+  }
+
  private:
   static ABSL_ATTRIBUTE_ALWAYS_INLINE inline void EvaluateReadSlotStep(
       size_t slot_index, ExecutionFrame& frame);
@@ -406,6 +424,8 @@ class ExpressionStep {
     EagerFunctionStep* eager_function_step;
     LazyFunctionStep* lazy_function_step;
     std::string* identifier;
+    ListStepInfo* create_list_step;
+    SmallListStepInfo create_small_list_step;
 
     Data() : empty(nullptr) {}
     ~Data() {}
@@ -430,14 +450,11 @@ class FlatExpressionEvaluatorState {
  public:
   FlatExpressionEvaluatorState(
       size_t value_stack_size, size_t comprehension_slot_count,
-      const cel::TypeProvider& type_provider,
+      size_t iterator_stack_size, const cel::TypeProvider& type_provider,
       const google::protobuf::DescriptorPool* absl_nonnull descriptor_pool,
       google::protobuf::MessageFactory* absl_nullable message_factory = nullptr)
       : value_stack_(value_stack_size),
-        // We currently use comprehension_slot_count because it is less of an
-        // over estimate than value_stack_size. In future we should just
-        // calculate the correct capacity.
-        iterator_stack_(comprehension_slot_count),
+        iterator_stack_(iterator_stack_size),
         comprehension_slots_(comprehension_slot_count),
         type_provider_(type_provider),
         descriptor_pool_(descriptor_pool),
@@ -445,15 +462,12 @@ class FlatExpressionEvaluatorState {
 
   FlatExpressionEvaluatorState(
       size_t value_stack_size, size_t comprehension_slot_count,
-      const cel::TypeProvider& type_provider,
+      size_t iterator_stack_size, const cel::TypeProvider& type_provider,
       const google::protobuf::DescriptorPool* absl_nonnull descriptor_pool,
       google::protobuf::MessageFactory* absl_nonnull message_factory,
       google::protobuf::Arena* absl_nonnull arena)
       : value_stack_(value_stack_size),
-        // We currently use comprehension_slot_count because it is less of an
-        // over estimate than value_stack_size. In future we should just
-        // calculate the correct capacity.
-        iterator_stack_(comprehension_slot_count),
+        iterator_stack_(iterator_stack_size),
         comprehension_slots_(comprehension_slot_count),
         type_provider_(type_provider),
         descriptor_pool_(descriptor_pool),
@@ -859,19 +873,21 @@ class FlatExpression {
       : path_(std::move(path)),
         subexpressions_({path_}),
         comprehension_slots_size_(comprehension_slots_size),
+        iterator_stack_size_(comprehension_slots_size),
         type_provider_(type_provider),
         options_(options),
         arena_(std::move(arena)) {}
 
   FlatExpression(ExecutionPath path,
                  std::vector<ExecutionPathView> subexpressions,
-                 size_t comprehension_slots_size,
+                 size_t comprehension_slots_size, size_t iterator_stack_size,
                  const cel::TypeProvider& type_provider,
                  const cel::RuntimeOptions& options,
                  absl_nullable std::shared_ptr<google::protobuf::Arena> arena = nullptr)
       : path_(std::move(path)),
         subexpressions_(std::move(subexpressions)),
         comprehension_slots_size_(comprehension_slots_size),
+        iterator_stack_size_(iterator_stack_size),
         type_provider_(type_provider),
         options_(options),
         arena_(std::move(arena)) {}
@@ -914,12 +930,15 @@ class FlatExpression {
 
   size_t comprehension_slots_size() const { return comprehension_slots_size_; }
 
+  size_t iterator_stack_size() const { return iterator_stack_size_; }
+
   const cel::TypeProvider& type_provider() const { return type_provider_; }
 
  private:
   ExecutionPath path_;
   std::vector<ExecutionPathView> subexpressions_;
   size_t comprehension_slots_size_;
+  size_t iterator_stack_size_;
   const cel::TypeProvider& type_provider_;
   cel::RuntimeOptions options_;
   // Arena used during planning phase, may hold constant values so should be
@@ -983,6 +1002,9 @@ inline ExpressionStep::~ExpressionStep() {
     case ExpressionStepKind::kLazyFunction:
       delete u_.lazy_function_step;
       break;
+    case ExpressionStepKind::kCreateList:
+      delete u_.create_list_step;
+      break;
     case ExpressionStepKind::kMovedFrom:
     case ExpressionStepKind::kIntConstant:
     case ExpressionStepKind::kBoolConstant:
@@ -1011,6 +1033,7 @@ inline ExpressionStep::~ExpressionStep() {
     case ExpressionStepKind::kFastNotEqual:
     case ExpressionStepKind::kNewMutableList:
     case ExpressionStepKind::kMutableListAppend:
+    case ExpressionStepKind::kCreateSmallList:
       break;
     default:
       ABSL_UNREACHABLE();
@@ -1202,6 +1225,12 @@ inline void ExpressionStep::Evaluate(ExecutionFrame& frame) const {
       break;
     case ExpressionStepKind::kMutableListAppend:
       EvaluateMutableListAppendStep(frame);
+      break;
+    case ExpressionStepKind::kCreateList:
+      EvaluateListStep(*u_.create_list_step, frame);
+      break;
+    case ExpressionStepKind::kCreateSmallList:
+      EvaluateSmallListStep(u_.create_small_list_step, frame);
       break;
     case ExpressionStepKind::kMovedFrom:
       frame.Abort(absl::InternalError(
