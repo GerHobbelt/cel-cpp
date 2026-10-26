@@ -166,7 +166,8 @@ std::optional<SelectInstruction> GetSelectInstruction(
 }
 
 absl::StatusOr<SelectQualifier> SelectQualifierFromList(const ListExpr& list) {
-  if (list.elements().size() != 2) {
+  // Type codes may follow [number, name]; they're unused here.
+  if (list.elements().size() < 2 || list.elements().size() > 4) {
     return absl::InvalidArgumentError("Invalid cel.attribute select list");
   }
 
@@ -234,7 +235,7 @@ absl::StatusOr<size_t> ListIndexFromQualifier(const AttributeQualifier& qual) {
   int64_t value = -1;
   switch (qual.kind()) {
     case Kind::kInt:
-      value = *qual.GetInt64Key();
+      value = *qual.AsInt();
       break;
     default:
       // TODO(uncreated-issue/51): type-checker will reject an unsigned literal, but
@@ -254,11 +255,11 @@ absl::StatusOr<Value> MapKeyFromQualifier(const AttributeQualifier& qual,
                                           google::protobuf::Arena* absl_nonnull arena) {
   switch (qual.kind()) {
     case Kind::kInt:
-      return cel::IntValue(*qual.GetInt64Key());
+      return cel::IntValue(*qual.AsInt());
     case Kind::kUint:
-      return cel::UintValue(*qual.GetUint64Key());
+      return cel::UintValue(*qual.AsUint());
     case Kind::kBool:
-      return cel::BoolValue(*qual.GetBoolKey());
+      return cel::BoolValue(*qual.AsBool());
     case Kind::kString:
       // Safe as `qual` is valid for the lifetime of the expression/program.
       return StringValue::WrapUnsafe(*qual.GetStringKey());
@@ -399,8 +400,9 @@ absl::StatusOr<std::vector<SelectQualifier>> SelectInstructionsFromCall(
 
 class RewriterImpl : public AstRewriterBase {
  public:
-  RewriterImpl(const Ast& ast, PlannerContext& planner_context)
-      : ast_(ast), planner_context_(planner_context) {}
+  RewriterImpl(const Ast& ast, PlannerContext& planner_context,
+               const SelectOptimizationOptions& options)
+      : ast_(ast), planner_context_(planner_context), options_(options) {}
 
   void PreVisitExpr(const Expr& expr) override { path_.push_back(&expr); }
 
@@ -473,6 +475,10 @@ class RewriterImpl : public AstRewriterBase {
     }
 
     SelectPath path = GetSelectPath(&expr);
+    if (path.select_instructions.size() <
+        options_.min_field_depth_for_optimization) {
+      return false;
+    }
 
     // generate the new cel.attribute call.
     absl::string_view fn = path.test_only ? kCelHasField : kCelAttribute;
@@ -555,6 +561,7 @@ class RewriterImpl : public AstRewriterBase {
 
   const Ast& ast_;
   PlannerContext& planner_context_;
+  SelectOptimizationOptions options_;
   // ids of potentially optimizeable expr nodes.
   absl::flat_hash_map<const Expr*, QualifierInstruction> candidates_;
   std::vector<const Expr*> path_;
@@ -774,14 +781,13 @@ absl::Status SelectOptimizer::OnPostVisit(PlannerContext& context,
   if (fn != kCelHasField && fn != kCelAttribute) {
     return absl::OkStatus();
   }
+  const bool presence_test = fn == kCelHasField;
 
-  if (node.call_expr().args().size() < 2 ||
-      node.call_expr().args().size() > 3) {
+  // cel.@attribute may take a 3rd arg that only types the result; it's unused.
+  const size_t max_args = presence_test ? 2 : 3;
+  const size_t num_args = node.call_expr().args().size();
+  if (num_args < 2 || num_args > max_args) {
     return absl::InvalidArgumentError("Invalid cel.attribute call");
-  }
-
-  if (node.call_expr().args().size() == 3) {
-    return absl::UnimplementedError("Optionals not yet supported");
   }
 
   CEL_ASSIGN_OR_RETURN(std::vector<SelectQualifier> instructions,
@@ -789,12 +795,6 @@ absl::Status SelectOptimizer::OnPostVisit(PlannerContext& context,
 
   if (instructions.empty()) {
     return absl::InvalidArgumentError("Invalid cel.attribute no select steps.");
-  }
-
-  bool presence_test = false;
-
-  if (fn == kCelHasField) {
-    presence_test = true;
   }
 
   const Expr& operand = node.call_expr().args()[0];
@@ -841,8 +841,8 @@ absl::Status SelectOptimizer::OnPostVisit(PlannerContext& context,
   absl::c_move(operand_subplan, std::back_inserter(path));
 
   path.push_back(ExpressionStep::MakeGenericStep(
-      std::make_unique<StackMachineImpl>(node.id(), std::move(impl)),
-      node.id()));
+      std::make_unique<StackMachineImpl>(node.id(), std::move(impl)), node.id(),
+      /*stack_delta=*/0));
 
   return context.ReplaceSubplan(node, std::move(path));
 }
@@ -864,7 +864,7 @@ google::api::expr::runtime::FlatExprBuilder* GetFlatExprBuilder(
 
 absl::Status SelectOptimizationAstUpdater::UpdateAst(PlannerContext& context,
                                                      Ast& ast) const {
-  RewriterImpl rewriter(ast, context);
+  RewriterImpl rewriter(ast, context, options_);
   AstRewrite(ast.mutable_root_expr(), rewriter);
   return rewriter.GetProgressStatus();
 }
@@ -886,15 +886,19 @@ absl::Status EnableSelectOptimization(
   }
 
   flat_expr_builder->AddAstTransform(
-      std::make_unique<SelectOptimizationAstUpdater>());
+      std::make_unique<SelectOptimizationAstUpdater>(options));
   // Add overloads for select optimization signature.
   // These are never bound, only used to prevent the builder from failing on
   // the overloads check.
   CEL_RETURN_IF_ERROR(builder.function_registry().RegisterLazyFunction(
       FunctionDescriptor(kCelAttribute, false, {Kind::kAny, Kind::kList})));
+  CEL_RETURN_IF_ERROR(
+      builder.function_registry().RegisterLazyFunction(FunctionDescriptor(
+          kCelAttribute, false, {Kind::kAny, Kind::kList, Kind::kAny})));
 
   CEL_RETURN_IF_ERROR(builder.function_registry().RegisterLazyFunction(
       FunctionDescriptor(kCelHasField, false, {Kind::kAny, Kind::kList})));
+  flat_expr_builder->enable_select_optimization();
   // Add runtime implementation.
   flat_expr_builder->AddProgramOptimizer(
       CreateSelectOptimizationProgramOptimizer(options));

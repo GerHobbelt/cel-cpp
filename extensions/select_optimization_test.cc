@@ -528,6 +528,47 @@ TEST_F(SelectOptimizationTest, AstTransformComplexSelect) {
       ElementsAre(SelectFieldEntry(1, "child"), SelectFieldEntry(1, "child")));
 }
 
+TEST_F(SelectOptimizationTest, AstTransformMinFieldDepth) {
+  ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<cel::Ast> ast,
+      CompileForTestCase(
+          "((false)? a.child.child : b.child).child.payload.single_int64"));
+
+  SelectOptimizationOptions options;
+  options.min_field_depth_for_optimization = 2;
+  SelectOptimizationAstUpdater updater(options);
+  EXPECT_THAT(updater.UpdateAst(context_, *ast), IsOk());
+
+  const CallExpr& attr_call = ast->root_expr().call_expr();
+  EXPECT_EQ(attr_call.function(), "cel.@attribute");
+
+  ASSERT_THAT(attr_call.args(), SizeIs(2));
+
+  EXPECT_THAT(
+      attr_call.args()[1].list_expr().elements(),
+      ElementsAre(SelectFieldEntry(1, "child"), SelectFieldEntry(2, "payload"),
+                  SelectFieldEntry(2, "single_int64")));
+
+  const Expr& operand = attr_call.args()[0];
+
+  EXPECT_EQ(operand.call_expr().function(), cel::builtin::kTernary);
+  ASSERT_THAT(operand.call_expr().args(), SizeIs(3));
+
+  const Expr& true_branch = operand.call_expr().args()[1];
+
+  EXPECT_EQ(true_branch.call_expr().function(), "cel.@attribute");
+  ASSERT_THAT(true_branch.call_expr().args(), SizeIs(2));
+
+  EXPECT_THAT(
+      true_branch.call_expr().args()[1].list_expr().elements(),
+      ElementsAre(SelectFieldEntry(1, "child"), SelectFieldEntry(1, "child")));
+
+  const Expr& false_branch = operand.call_expr().args()[2];
+  EXPECT_TRUE(false_branch.has_select_expr());
+  EXPECT_EQ(false_branch.select_expr().field(), "child");
+  EXPECT_EQ(false_branch.select_expr().operand().ident_expr().name(), "b");
+}
+
 TEST_F(SelectOptimizationTest, AstTransformMapIndexTraversal) {
   // nested_test_all_types.payload.map_string_message['$not_a_field'].bb
   ASSERT_OK_AND_ASSIGN(std::unique_ptr<cel::Ast> ast,
@@ -1261,6 +1302,23 @@ INSTANTIATE_TEST_SUITE_P(
             },
         },
         {
+            // -2^32, which would read element 0 if truncated to an int.
+            "select_with_repeated_index_beyond_int32",
+            "nested_test_all_types.payload.repeated_nested_message"
+            "[-4294967296].bb",
+            {{"nested_test_all_types",
+              R"pb(
+                payload { repeated_nested_message {} }
+              )pb"}},
+            ActivationSetupFn(),
+            [](const absl::StatusOr<Value>& got) {
+              ASSERT_OK_AND_ASSIGN(Value result, got);
+              ASSERT_TRUE(result->Is<ErrorValue>()) << result->DebugString();
+              EXPECT_THAT(result.GetError().NativeValue(),
+                          StatusIs(absl::StatusCode::kInvalidArgument));
+            },
+        },
+        {
             "unknown_field",
             "((false)? a.child.child : b.child).child.payload.single_int64",
             {{"a", ""},
@@ -1753,6 +1811,39 @@ class SelectOptimizationUnexpectedAstTest : public SelectOptimizationTest {
     return element;
   }
 
+  Expr NextInt(int64_t value) {
+    Expr result = NextExpr();
+    result.mutable_const_expr().set_int_value(value);
+    return result;
+  }
+
+  Expr NextString(absl::string_view value) {
+    Expr result = NextExpr();
+    result.mutable_const_expr().set_string_value(value);
+    return result;
+  }
+
+  template <typename... Exprs>
+  Expr NextList(Exprs... elements) {
+    Expr result = NextExpr();
+    (result.mutable_list_expr().add_elements().set_expr(std::move(elements)),
+     ...);
+    return result;
+  }
+
+  // Plans `fn(ident, args...)` with only the select program optimizer.
+  template <typename... Exprs>
+  absl::Status PlanSelectCall(absl::string_view fn, Exprs... args) {
+    auto ast = std::make_unique<Ast>(NextExpr(), SourceInfo());
+    auto& call = ast->mutable_root_expr().mutable_call_expr();
+    call.set_function(fn);
+    call.add_args().mutable_ident_expr().set_name("ident");
+    (call.mutable_args().push_back(std::move(args)), ...);
+    FlatExprBuilder builder(env_, runtime_options_);
+    builder.AddProgramOptimizer(CreateSelectOptimizationProgramOptimizer());
+    return builder.CreateExpressionImpl(std::move(ast), nullptr).status();
+  }
+
  protected:
   int64_t next_id_;
 };
@@ -1907,37 +1998,46 @@ TEST_F(SelectOptimizationUnexpectedAstTest,
               StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
-TEST_F(SelectOptimizationUnexpectedAstTest, OptionalNotYetSupported) {
-  std::unique_ptr<Ast> ast = std::make_unique<Ast>(NextExpr(), SourceInfo());
+TEST_F(SelectOptimizationUnexpectedAstTest, TypedTupleAttributeAccepted) {
+  using FieldDescriptor = google::protobuf::FieldDescriptor;
+  // [field_num, field_name, type_code] hops, a map leaf
+  // [field_num, field_name, -1, [key_type, value_type]], and a 3rd argument
+  // that only binds the result type.
+  EXPECT_THAT(
+      PlanSelectCall(
+          kCelAttribute,
+          NextList(NextList(NextInt(1), NextString("field"),
+                            NextInt(FieldDescriptor::TYPE_MESSAGE)),
+                   NextList(NextInt(2), NextString("map_field"), NextInt(-1),
+                            NextList(NextInt(FieldDescriptor::TYPE_STRING),
+                                     NextInt(FieldDescriptor::TYPE_INT32)))),
+          NextInt(0)),
+      IsOk());
+}
 
-  ast->mutable_root_expr().mutable_call_expr().set_function(kCelAttribute);
-  auto& call_args = ast->mutable_root_expr().mutable_call_expr().mutable_args();
-  call_args.emplace_back(NextExpr()).mutable_ident_expr().set_name("ident");
+TEST_F(SelectOptimizationUnexpectedAstTest, TooManyArguments) {
+  EXPECT_THAT(
+      PlanSelectCall(kCelHasField,
+                     NextList(NextList(NextInt(1), NextString("field"))),
+                     NextInt(0)),
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               HasSubstr("Invalid cel.attribute call")));
+  EXPECT_THAT(
+      PlanSelectCall(kCelAttribute,
+                     NextList(NextList(NextInt(1), NextString("field"))),
+                     NextInt(0), NextInt(0)),
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               HasSubstr("Invalid cel.attribute call")));
+}
 
-  auto& list_expr = call_args.emplace_back(NextExpr()).mutable_list_expr();
-  auto& fields = list_expr.mutable_elements()
-                     .emplace_back(NextListExprElement())
-                     .mutable_expr()
-                     .mutable_list_expr()
-                     .mutable_elements();
-
-  fields.emplace_back(NextListExprElement())
-      .mutable_expr()
-      .mutable_const_expr()
-      .set_int64_value(1);
-  fields.emplace_back(NextListExprElement())
-      .mutable_expr()
-      .mutable_const_expr()
-      .set_string_value("field");
-
-  call_args.emplace_back(NextExpr()).mutable_const_expr().set_int64_value(0);
-
-  FlatExprBuilder builder(env_, runtime_options_);
-
-  builder.AddProgramOptimizer(CreateSelectOptimizationProgramOptimizer());
-
-  EXPECT_THAT(builder.CreateExpressionImpl(std::move(ast), nullptr),
-              StatusIs(absl::StatusCode::kUnimplemented));
+TEST_F(SelectOptimizationUnexpectedAstTest,
+       MalformedSelectPathTooManyElements) {
+  EXPECT_THAT(
+      PlanSelectCall(kCelAttribute,
+                     NextList(NextList(NextInt(1), NextString("field"),
+                                       NextInt(5), NextInt(0), NextInt(0)))),
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               HasSubstr("Invalid cel.attribute select list")));
 }
 
 }  // namespace

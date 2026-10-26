@@ -35,10 +35,20 @@ struct SelectOptimizationOptions {
   // unimplemented for a given StructType. This option is exposed for testing or
   // to more closely match behavior of unoptimized expressions.
   bool force_fallback_implementation = false;
+
+  // The minimum depth of a select chain to be considered for optimization.
+  // For example, if this is set to 2, then `a.b.c` will be optimized, but
+  // `a.b` will not be.
+  //
+  // This is applied in the pre-pass phase that rewrites the AST. If the
+  // optimization is already applied by a compiler / static optimizer, this
+  // option has no effect.
+  int min_field_depth_for_optimization = 0;
 };
 
 // Enable select optimization on the given RuntimeBuilder, replacing long
-// select chains with a single operation.
+// select chains with a single operation. Also enables planning ASTs tagged with
+// the `select_optimization` runtime extension.
 //
 // This assumes that the type information at check time agrees with the
 // configured types at runtime.
@@ -76,10 +86,15 @@ absl::Status EnableSelectOptimization(
 class SelectOptimizationAstUpdater
     : public google::api::expr::runtime::AstTransform {
  public:
-  SelectOptimizationAstUpdater() = default;
+  explicit SelectOptimizationAstUpdater(
+      const SelectOptimizationOptions& options = {})
+      : options_(options) {}
 
   absl::Status UpdateAst(google::api::expr::runtime::PlannerContext& context,
                          cel::Ast& ast) const override;
+
+ private:
+  SelectOptimizationOptions options_;
 };
 
 google::api::expr::runtime::ProgramOptimizerFactory
